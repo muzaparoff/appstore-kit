@@ -51,7 +51,10 @@ def put_chunk(url, headers, data):
 
 
 def text(p):
-    return (META / p).read_text().strip()
+    """Missing metadata file -> None: the field keeps its current ASC value,
+    matching fastlane deliver's behavior."""
+    f = META / p
+    return f.read_text().strip() if f.exists() else None
 
 
 def main():
@@ -83,14 +86,14 @@ def main():
     # 2. Version localization (en-US): description, keywords, promo, URLs, notes.
     locs = req("GET", f"/appStoreVersions/{vid}/appStoreVersionLocalizations")["data"]
     en = next((l for l in locs if l["attributes"]["locale"] == "en-US"), None)
-    loc_attrs = {
+    loc_attrs = {k: v for k, v in {
         "description": text("en-US/description.txt"),
         "keywords": text("en-US/keywords.txt"),
         "promotionalText": text("en-US/promotional_text.txt"),
         "supportUrl": text("en-US/support_url.txt"),
         "marketingUrl": text("en-US/marketing_url.txt"),
         "whatsNew": text("en-US/release_notes.txt"),
-    }
+    }.items() if v is not None}
     if en:
         # whatsNew is rejected by the API for a first-ever version.
         first_release = len(versions) == 1
@@ -111,10 +114,16 @@ def main():
     info = next(i for i in infos if i["attributes"]["appStoreState"] != "READY_FOR_SALE")
     info_locs = req("GET", f"/appInfos/{info['id']}/appInfoLocalizations")["data"]
     ien = next((l for l in info_locs if l["attributes"]["locale"] == "en-US"), None)
-    info_attrs = {"name": text("en-US/name.txt"),
-                  "subtitle": text("en-US/subtitle.txt"),
-                  "privacyPolicyUrl": text("en-US/privacy_url.txt")}
-    if ien:
+    info_attrs = {k: v for k, v in {
+        "name": text("en-US/name.txt"),
+        "subtitle": text("en-US/subtitle.txt"),
+        "privacyPolicyUrl": text("en-US/privacy_url.txt")}.items() if v is not None}
+    if not info_attrs:
+        print("3/6 app info: nothing to set")
+        info_attrs = None
+    if info_attrs is None:
+        pass
+    elif ien:
         req("PATCH", f"/appInfoLocalizations/{ien['id']}", {"data": {
             "type": "appInfoLocalizations", "id": ien["id"], "attributes": info_attrs}})
     else:
@@ -124,13 +133,20 @@ def main():
             "relationships": {"appInfo": {"data": {"type": "appInfos", "id": info["id"]}}}}})
     print("3/6 name, subtitle, privacy URL set")
 
-    # 4. Categories.
-    req("PATCH", f"/appInfos/{info['id']}", {"data": {
-        "type": "appInfos", "id": info["id"],
-        "relationships": {
-            "primaryCategory": {"data": {"type": "appCategories", "id": "TRAVEL"}},
-            "secondaryCategory": {"data": {"type": "appCategories", "id": "PRODUCTIVITY"}}}}})
-    print("4/6 categories TRAVEL/PRODUCTIVITY set")
+    # 4. Categories (from metadata files; missing files keep current values).
+    primary = text("primary_category.txt")
+    secondary = text("secondary_category.txt")
+    rels = {}
+    if primary:
+        rels["primaryCategory"] = {"data": {"type": "appCategories", "id": primary}}
+    if secondary:
+        rels["secondaryCategory"] = {"data": {"type": "appCategories", "id": secondary}}
+    if rels:
+        req("PATCH", f"/appInfos/{info['id']}", {"data": {
+            "type": "appInfos", "id": info["id"], "relationships": rels}})
+        print(f"4/6 categories set: {primary}/{secondary}")
+    else:
+        print("4/6 categories: keeping current values")
 
     # 5. Attach the build.
     builds = req("GET", f"/builds?filter[app]={APP_ID}&filter[version]={build_number}")["data"]
@@ -158,8 +174,14 @@ def main():
     existing = req("GET", f"/appScreenshotSets/{target['id']}/appScreenshots")["data"]
     for shot in existing:
         req("DELETE", f"/appScreenshots/{shot['id']}")
+    pngs = sorted(SHOTS.glob("*.png"))
+    framed = [p for p in pngs if p.stem.endswith("_framed")]
+    if framed:
+        # fastlane-frameit layout: prefer the framed marketing versions and
+        # ignore their raw siblings, matching deliver's behavior.
+        pngs = framed
     order = []
-    for png in sorted(SHOTS.glob("*.png")):
+    for png in pngs:
         blob = png.read_bytes()
         shot = req("POST", "/appScreenshots", {"data": {
             "type": "appScreenshots",

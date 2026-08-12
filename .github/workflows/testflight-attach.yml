@@ -1,0 +1,105 @@
+name: 🔗 Attach Build to Testers (kit)
+
+# Uploading a build does NOT make it installable: it must be attached to a beta
+# group. The release pipeline missed this, so testers sat on build 10 while 11 and
+# 12 uploaded into the void. Called automatically at the end of a release, and
+# dispatchable by hand for repair.
+on:
+  workflow_call:
+    inputs:
+      bundle_id:
+        type: string
+        required: true
+      build_number:
+        description: "Build number to attach (blank = newest VALID)"
+        type: string
+        default: ""
+
+jobs:
+  attach:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Attach build to all internal groups
+        env:
+          KEY_ID:    ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ISSUER_ID }}
+          KEY_B64:   ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          WANTED:    ${{ inputs.build_number }}
+        run: |
+          # Homebrew's python refuses global installs (PEP 668); a per-run venv in
+          # RUNNER_TEMP works on the self-hosted Mac and hosted images alike.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyjwt cryptography requests
+          echo "$KEY_B64" | base64 --decode > /tmp/key.p8
+          "$RUNNER_TEMP/venv/bin/python3" <<'PY'
+          import os, time, jwt, requests
+
+          def token():
+              return jwt.encode(
+                  {"iss": os.environ["ISSUER_ID"], "iat": int(time.time()),
+                   "exp": int(time.time()) + 900, "aud": "appstoreconnect-v1"},
+                  open('/tmp/key.p8').read(), algorithm="ES256",
+                  headers={"kid": os.environ["KEY_ID"], "typ": "JWT"})
+          def H():
+              return {"Authorization": f"Bearer {token()}",
+                      "Content-Type": "application/json"}
+          API = "https://api.appstoreconnect.apple.com/v1"
+
+          app = requests.get(f"{API}/apps",
+                             params={"filter[bundleId]": os.environ["BUNDLE_ID"]},
+                             headers=H()).json()["data"][0]
+          wanted = os.environ.get("WANTED", "").strip()
+
+          # Wait out processing: a build uploaded moments ago may not be VALID yet.
+          build = None
+          for attempt in range(40):
+              rows = requests.get(f"{API}/builds",
+                                  params={"filter[app]": app["id"], "limit": 10,
+                                          "sort": "-uploadedDate"},
+                                  headers=H()).json().get("data", [])
+              candidates = [b for b in rows
+                            if b["attributes"].get("processingState") == "VALID"
+                            and (not wanted or b["attributes"].get("version") == wanted)]
+              if candidates:
+                  build = candidates[0]
+                  break
+              print(f"[{attempt}] no VALID build yet, waiting…")
+              time.sleep(30)
+          if not build:
+              print("::error::No VALID build found to attach")
+              raise SystemExit(1)
+          v = build["attributes"]["version"]
+          print(f"attaching build {v} ({build['id']})")
+
+          # A build with the encryption question unanswered is invisible to testers no
+          # matter what group it is in — this is what held builds at "Missing
+          # Compliance" while phones kept seeing an old version as latest.
+          if build["attributes"].get("usesNonExemptEncryption") is None:
+              r = requests.patch(f"{API}/builds/{build['id']}", headers=H(), json={
+                  "data": {"type": "builds", "id": build["id"],
+                           "attributes": {"usesNonExemptEncryption": False}}})
+              print(f"  export compliance: {'answered (exempt)' if r.status_code == 200 else f'FAILED {r.status_code} {r.text[:200]}'}")
+          else:
+              print("  export compliance: already answered")
+
+          groups = requests.get(f"{API}/betaGroups",
+                                params={"filter[app]": app["id"]},
+                                headers=H()).json().get("data", [])
+          for g in groups:
+              name = g["attributes"].get("name")
+              # An internal group with hasAccessToAllBuilds receives every build
+              # automatically — attaching is both impossible (422) and unnecessary.
+              if g["attributes"].get("hasAccessToAllBuilds"):
+                  print(f"  group {name!r}: receives all builds automatically — nothing to do")
+                  continue
+              r = requests.post(f"{API}/betaGroups/{g['id']}/relationships/builds",
+                                headers=H(),
+                                json={"data": [{"type": "builds", "id": build["id"]}]})
+              ok = r.status_code in (200, 201, 204)
+              print(f"  group {name!r}: {'attached' if ok else f'FAILED {r.status_code} {r.text[:200]}'}")
+              if not ok:
+                  raise SystemExit(1)
+          print(f"Build {v} is now installable by testers.")
+          PY
+          rm -f /tmp/key.p8

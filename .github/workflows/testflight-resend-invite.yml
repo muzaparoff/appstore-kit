@@ -1,0 +1,70 @@
+name: ✉️ Resend TestFlight Invite (kit)
+
+# "This invitation has been revoked or is invalid" means the tester's existing
+# invitation can no longer be redeemed. Apple's own instruction is to request a new
+# one; this issues it.
+on:
+  workflow_call:
+    inputs:
+      bundle_id:
+        type: string
+        required: true
+      email:
+        description: "Tester email to re-invite"
+        type: string
+        required: true
+
+jobs:
+  resend:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Issue a fresh invitation
+        env:
+          KEY_ID:    ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ISSUER_ID }}
+          KEY_B64:   ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          EMAIL:     ${{ inputs.email }}
+        run: |
+          # Homebrew's python refuses global installs (PEP 668); a per-run venv in
+          # RUNNER_TEMP works on the self-hosted Mac and hosted images alike.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyjwt cryptography requests
+          echo "$KEY_B64" | base64 --decode > /tmp/key.p8
+          "$RUNNER_TEMP/venv/bin/python3" <<'PY'
+          import os, time, jwt, requests
+
+          tok = jwt.encode(
+              {"iss": os.environ["ISSUER_ID"], "iat": int(time.time()),
+               "exp": int(time.time()) + 900, "aud": "appstoreconnect-v1"},
+              open('/tmp/key.p8').read(), algorithm="ES256",
+              headers={"kid": os.environ["KEY_ID"], "typ": "JWT"})
+          H = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+          API = "https://api.appstoreconnect.apple.com/v1"
+          email = os.environ["EMAIL"]
+
+          app = requests.get(f"{API}/apps",
+                             params={"filter[bundleId]": os.environ["BUNDLE_ID"]},
+                             headers=H).json()["data"][0]
+
+          testers = requests.get(f"{API}/betaTesters",
+                                 params={"filter[apps]": app["id"],
+                                         "filter[email]": email},
+                                 headers=H).json().get("data", [])
+          if not testers:
+              print(f"::error::{email} is not a tester on this app")
+              raise SystemExit(1)
+          t = testers[0]
+          print(f"tester {email}: state={t['attributes'].get('state')}")
+
+          r = requests.post(f"{API}/betaTesterInvitations", headers=H, json={
+              "data": {"type": "betaTesterInvitations", "relationships": {
+                  "app":        {"data": {"type": "apps", "id": app["id"]}},
+                  "betaTester": {"data": {"type": "betaTesters", "id": t["id"]}}}}})
+          print("invite request:", r.status_code)
+          if r.status_code not in (200, 201):
+              print(r.text[:600])
+              raise SystemExit(1)
+          print(f"New invitation sent to {email}. Open it on the iPhone itself.")
+          PY
+          rm -f /tmp/key.p8

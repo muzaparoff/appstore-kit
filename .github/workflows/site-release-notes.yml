@@ -1,0 +1,90 @@
+# Publishes this release's notes to the public website (the app's public site repo).
+#
+# Dispatched by ci.yml right after it tags a version — the same pattern as the
+# release workflow, because tags pushed with GITHUB_TOKEN never fire `on: push`.
+# Extracts feat:/fix: subjects between the previous tag and this one, rewrites
+# the version's entry in docs/releases.json (idempotent — safe to re-run), and
+# pushes to the site repo over a deploy key. GitHub Pages redeploys on its own.
+name: 📝 Site Release Notes (kit)
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.25.0)"
+        type: string
+        required: true
+      site_repo:
+        description: "owner/repo of the public site (GitHub Pages from docs/)"
+        type: string
+        required: true
+
+jobs:
+  publish:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Check out app history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+
+      - name: Extract notes for this release
+        id: notes
+        run: |
+          TAG="${{ inputs.tag }}"
+          PREV=$(git tag --sort=creatordate | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -B1 -x "$TAG" | head -1)
+          if [ "$PREV" = "$TAG" ] || [ -z "$PREV" ]; then RANGE="$TAG"; else RANGE="$PREV..$TAG"; fi
+          echo "Range: $RANGE"
+          git log --format=%s "$RANGE" > /tmp/subjects.txt
+          DATE=$(git log -1 --format=%cs "$TAG")
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Update releases.json on the site
+        env:
+          SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          KEYFILE="$RUNNER_TEMP/site_deploy_key"
+          printf '%s\n' "$SITE_DEPLOY_KEY" > "$KEYFILE"
+          chmod 600 "$KEYFILE"
+          export GIT_SSH_COMMAND="ssh -i $KEYFILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+          SITE="$RUNNER_TEMP/site"
+          rm -rf "$SITE"
+          git clone --depth 1 "git@github.com:${{ inputs.site_repo }}.git" "$SITE"
+
+          TAG="${{ inputs.tag }}" DATE="${{ steps.notes.outputs.date }}" \
+          python3 - "$SITE/docs/releases.json" <<'PY'
+          import json, os, re, sys
+          path = sys.argv[1]
+          version = os.environ["TAG"].lstrip("v")
+          date = os.environ["DATE"]
+          notes = []
+          for line in open("/tmp/subjects.txt"):
+              m = re.match(r"^(feat|fix)(\(.+?\))?!?:\s*(.+)$", line.strip())
+              if m:
+                  text = m.group(3).strip()
+                  notes.append({"type": m.group(1), "text": text[0].upper() + text[1:]})
+          if not notes:
+              print("No feat/fix commits in range; nothing to publish.")
+              sys.exit(0)
+          releases = json.load(open(path))
+          releases = [r for r in releases if r["version"] != version]
+          releases.insert(0, {"version": version, "date": date, "notes": notes[::-1]})
+          releases.sort(key=lambda r: [int(x) for x in r["version"].split(".")], reverse=True)
+          json.dump(releases, open(path, "w"), indent=1)
+          print(f"Wrote {version} with {len(notes)} notes.")
+          PY
+
+          cd "$SITE"
+          if git diff --quiet; then
+            echo "releases.json unchanged; nothing to push."
+            exit 0
+          fi
+          git config user.name "release-kit-ci"
+          git config user.email "ci@release-kit.invalid"
+          git add docs/releases.json
+          git commit -m "release notes: ${{ inputs.tag }}"
+          git push origin main
+          rm -f "$KEYFILE"

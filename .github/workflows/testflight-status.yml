@@ -1,0 +1,118 @@
+name: 📋 TestFlight Status (kit)
+
+# Answers "did the build actually arrive, and what does Apple think of it?"
+# The App Store Connect API needs the issuer ID, which only exists as a secret —
+# so the query runs here, where the secret is available, rather than locally.
+on:
+  workflow_call:
+    inputs:
+      bundle_id:
+        type: string
+        required: true
+
+jobs:
+  status:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Query App Store Connect
+        env:
+          KEY_ID:    ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ISSUER_ID }}
+          KEY_B64:   ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          # Homebrew's python refuses global installs (PEP 668); a per-run venv in
+          # RUNNER_TEMP works on the self-hosted Mac and hosted images alike.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyjwt cryptography requests
+          echo "$KEY_B64" | base64 --decode > /tmp/key.p8
+          "$RUNNER_TEMP/venv/bin/python3" <<'PY'
+          import os, time, jwt, requests
+
+          key = open('/tmp/key.p8').read()
+          tok = jwt.encode(
+              {"iss": os.environ["ISSUER_ID"], "iat": int(time.time()),
+               "exp": int(time.time()) + 900, "aud": "appstoreconnect-v1"},
+              key, algorithm="ES256",
+              headers={"kid": os.environ["KEY_ID"], "typ": "JWT"})
+          H = {"Authorization": f"Bearer {tok}"}
+          API = "https://api.appstoreconnect.apple.com/v1"
+
+          apps = requests.get(f"{API}/apps",
+                              params={"filter[bundleId]": os.environ["BUNDLE_ID"]},
+                              headers=H).json()
+          data = apps.get("data", [])
+          if not data:
+              print("::error::No app record found for this bundle id")
+              raise SystemExit(1)
+          app = data[0]
+          print(f"App: {app['attributes']['name']}  (id {app['id']})")
+
+          builds = requests.get(f"{API}/builds",
+                                params={"filter[app]": app["id"], "limit": 10,
+                                        "sort": "-uploadedDate",
+                                        # iconAssetToken tells us whether Apple
+                                        # extracted an icon from the build, which is
+                                        # what TestFlight and the listing display.
+                                        "fields[builds]": "version,processingState,"
+                                                          "uploadedDate,expired,iconAssetToken"},
+                                headers=H).json()
+          rows = builds.get("data", [])
+          if not rows:
+              print("No builds have arrived yet.")
+              raise SystemExit(0)
+
+          print()
+          print(f"{'BUILD':<8}{'STATE':<12}{'ICON':<10}UPLOADED")
+          for b in rows:
+              a = b["attributes"]
+              icon = "yes" if a.get("iconAssetToken") else "MISSING"
+              print(f"{str(a.get('version','?')):<8}"
+                    f"{str(a.get('processingState','?')):<12}"
+                    f"{icon:<10}"
+                    f"{a.get('uploadedDate','?')}")
+
+          # Groups: an invitation is "revoked or invalid" when the tester is not in a
+          # group, or the group has no build attached.
+          print("\n--- BETA GROUPS ---")
+          groups = requests.get(f"{API}/betaGroups",
+                                params={"filter[app]": app["id"]}, headers=H).json()
+          for g in groups.get("data", []):
+              ga = g["attributes"]
+              print(f"  {ga.get('name')!r}  internal={ga.get('isInternalGroup')}  "
+                    f"allBuilds={ga.get('hasAccessToAllBuilds')}  "
+                    f"publicLink={ga.get('publicLinkEnabled')}")
+              t = requests.get(f"{API}/betaGroups/{g['id']}/betaTesters", headers=H).json()
+              for x in t.get("data", []):
+                  xa = x["attributes"]
+                  print(f"      tester: {xa.get('email')}  state={xa.get('state')}")
+              bl = requests.get(f"{API}/betaGroups/{g['id']}/builds", headers=H).json()
+              vs = [b['attributes'].get('version') for b in bl.get("data", [])]
+              print(f"      builds attached: {vs or 'NONE  <-- nothing to install'}")
+
+          print("\n--- ALL TESTERS ON THE APP ---")
+          tst = requests.get(f"{API}/betaTesters",
+                             params={"filter[apps]": app["id"], "limit": 20},
+                             headers=H).json()
+          for x in tst.get("data", []):
+              xa = x["attributes"]
+              print(f"  {xa.get('email')}  state={xa.get('state')}  "
+                    f"invite={xa.get('inviteType')}")
+
+          # VALID only means processing finished. Whether testers can SEE a build is
+          # buildBetaDetail.internalBuildState — the gap where an uploaded release
+          # can hide. READY_FOR_BETA_TESTING / IN_BETA_TESTING = visible in the app.
+          print()
+          print(f"{'BUILD':<8}{'INTERNAL STATE':<30}ENCRYPTION")
+          for b in rows[:4]:
+              det = requests.get(f"{API}/builds/{b['id']}",
+                                 params={"include": "buildBetaDetail"},
+                                 headers=H).json()
+              at = det.get("data", {}).get("attributes", {})
+              state = "?"
+              for inc in det.get("included", []):
+                  if inc.get("type") == "buildBetaDetails":
+                      state = inc["attributes"].get("internalBuildState", "?")
+              print(f"{str(at.get('version','?')):<8}{state:<30}{at.get('usesNonExemptEncryption')}")
+          PY
+          rm -f /tmp/key.p8

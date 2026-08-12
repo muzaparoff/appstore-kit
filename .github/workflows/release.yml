@@ -1,0 +1,257 @@
+name: 🚀 TestFlight Release (kit)
+
+# Reusable archive/sign/upload workflow. Signing is deliberately
+# non-destructive for a personal Mac: temp keychain in RUNNER_TEMP, search
+# list prepended and restored exactly, login keychain as the safety floor.
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: "Path to the .xcodeproj"
+        type: string
+        required: true
+      scheme:
+        description: "Scheme to archive"
+        type: string
+        required: true
+      app_name:
+        description: "Product name (archive/IPA naming)"
+        type: string
+        required: true
+      export_plist:
+        description: "Path to ExportOptions.plist"
+        type: string
+        default: "ExportOptions.plist"
+      attach_workflow:
+        description: "Caller workflow that attaches the build to beta groups"
+        type: string
+        default: "testflight-attach.yml"
+      dry_run:
+        description: "Archive and export only — do NOT upload"
+        type: boolean
+        default: false
+
+jobs:
+  testflight:
+    name: Archive & Upload
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write   # the final step dispatches the attach workflow
+
+    env:
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        run: |
+          # No sudo: a personal Mac has no passwordless sudo, and DEVELOPER_DIR
+          # selects Xcode per-process anyway. Falls back to /Applications/Xcode.app
+          # for self-hosted, where that is the normal install path.
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -z "$XC" ] && [ -d /Applications/Xcode.app ] && XC=/Applications/Xcode.app
+          if [ -z "$XC" ]; then
+            echo "::error::No Xcode 26 on this runner. This app needs the iOS 26 SDK."
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$XC/Contents/Developer" xcodebuild -version
+
+      # A TestFlight build number must be unique and increasing for the version.
+      # run_number is monotonic per workflow, which is exactly that guarantee.
+      - name: Set version and build number
+        run: |
+          echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
+          # Marketing version comes from the tag (v1.2.3 -> 1.2.3) so the shipped
+          # version always matches the release that produced it.
+          REF="${{ github.ref }}"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            MV="${REF#refs/tags/v}"
+          else
+            MV=$(git tag -l 'v*.*.*' --sort=-v:refname | head -1 | sed 's/^v//')
+            MV=${MV:-1.0.0}
+          fi
+          echo "MARKETING_VERSION=$MV" >> "$GITHUB_ENV"
+          echo "Version $MV build ${{ github.run_number }}"
+
+      - name: Import signing certificate
+        env:
+          CERT_B64:     ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.KEY }}
+          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # This runs on a personal Mac now, not a disposable VM. The old version
+          # ran `security default-keychain -s build.keychain`, which hijacks the
+          # user's login keychain default — a crashed job would leave the machine
+          # broken. The temp keychain now lives in RUNNER_TEMP, is PREPENDED to the
+          # search list (default untouched), and the original list is saved so
+          # cleanup can restore it exactly.
+          KC="$RUNNER_TEMP/build.keychain-db"
+          echo "KC=$KC" >> "$GITHUB_ENV"
+          security list-keychains -d user > "$RUNNER_TEMP/keychains-before.txt"
+
+          echo "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KC"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KC"
+          security set-keychain-settings -t 3600 -u "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KC" > /dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          # Prepend, keeping whatever was there.
+          OLD=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychains -d user -s "$KC" $OLD
+          security find-identity -v -p codesigning "$KC"
+
+      - name: Install provisioning profiles
+        env:
+          PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          WIDGET_PROFILE_B64: ${{ secrets.WIDGET_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          # Two profiles now — app and widget extension. Names are pinned in the
+          # pbxproj (PROVISIONING_PROFILE_SPECIFIER per target) and in
+          # ExportOptions.plist, so installation is by UUID only.
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          for VAR in PROFILE_B64 WIDGET_PROFILE_B64; do
+            B64="${!VAR}"
+            if [ -z "$B64" ]; then
+              # Only the app profile is mandatory; extension profiles exist
+              # only for apps that have the matching target.
+              if [ "$VAR" = "PROFILE_B64" ]; then
+                echo "::error::IOS_PROVISIONING_PROFILE_BASE64 secret is empty."
+                exit 1
+              fi
+              echo "$VAR not set — skipping (no such target in this app)"
+              continue
+            fi
+            echo "$B64" | base64 --decode > /tmp/p.mobileprovision
+            UUID=$(security cms -D -i /tmp/p.mobileprovision \
+                   | plutil -extract UUID raw -o - -)
+            NAME=$(security cms -D -i /tmp/p.mobileprovision \
+                   | plutil -extract Name raw -o - -)
+            cp /tmp/p.mobileprovision \
+               ~/Library/MobileDevice/Provisioning\ Profiles/$UUID.mobileprovision
+            echo "Installed profile: $NAME ($UUID)"
+          done
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project "${{ inputs.project }}" \
+            -scheme "${{ inputs.scheme }}" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "build/${{ inputs.app_name }}.xcarchive" \
+            CURRENT_PROJECT_VERSION=$BUILD_NUMBER \
+            MARKETING_VERSION=$MARKETING_VERSION \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
+            2>&1 | tee archive.log | tail -30
+          # Signing style, identity, team, and per-target profile names live in
+          # the pbxproj Release configs — a CLI override here would clobber the
+          # widget's different profile with the app's.
+          # No xcpretty — not on a service PATH; pipefail carries xcodebuild's status.
+
+      - name: Export IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "build/${{ inputs.app_name }}.xcarchive" \
+            -exportPath build/export \
+            -exportOptionsPlist "${{ inputs.export_plist }}"
+          ls -la build/export
+
+      - name: Upload to TestFlight
+        # Skipped on a dry run. Everything before this — certificate import, profile
+        # installation, archive, export — is identical to a real release, so a dry run
+        # proves the signing chain without spending a version on TestFlight.
+        if: ${{ inputs.dry_run != true }}
+        env:
+          KEY_ID:    ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ISSUER_ID }}
+          KEY_B64:   ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$KEY_B64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8
+
+          IPA=$(ls build/export/*.ipa | head -1)
+
+          # altool can exit 0 while reporting a fatal error in its output, which once
+          # made a failed upload look like a successful release. Inspect the output,
+          # not just the exit status.
+          check() {
+            if grep -qiE "UPLOAD FAILED|ERROR:|Validation failed" "$1"; then
+              echo "::error::$2 rejected by App Store Connect"
+              grep -iE "ERROR:|detail :" "$1" | head -5
+              return 1
+            fi
+          }
+
+          set +e
+          xcrun altool --validate-app -f "$IPA" -t ios \
+            --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID" 2>&1 | tee validate.log
+          V=${PIPESTATUS[0]}
+          set -e
+          check validate.log "Validation" || exit 1
+          [ "$V" -eq 0 ] || { echo "::error::altool validate exited $V"; exit 1; }
+
+          set +e
+          xcrun altool --upload-app -f "$IPA" -t ios \
+            --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID" 2>&1 | tee upload.log
+          U=${PIPESTATUS[0]}
+          set -e
+          check upload.log "Upload" || exit 1
+          [ "$U" -eq 0 ] || { echo "::error::altool upload exited $U"; exit 1; }
+          echo "Uploaded build $BUILD_NUMBER"
+
+          rm -f ~/.appstoreconnect/private_keys/AuthKey_$KEY_ID.p8
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          echo "### Dry run — nothing uploaded" >> $GITHUB_STEP_SUMMARY
+          echo "Signed IPA produced and attached as an artifact." >> $GITHUB_STEP_SUMMARY
+          ls -la build/export/*.ipa >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app_name }}-ipa-${{ github.run_number }}
+          path: build/export/*.ipa
+          retention-days: 14
+
+      - name: Clean up keychain and workspace
+        if: always()
+        run: |
+          # Restore the exact keychain search list from before the job, then remove
+          # the temp keychain and heavy build products (self-hosted disk persists).
+          # NEVER write an empty list: an empty restore once left the whole Mac
+          # with no keychain search path — zero valid signing identities, broken
+          # trust chains, and every later release failing at codesign until the
+          # list was rebuilt by hand. Login keychain is the always-safe floor.
+          LOGIN="$HOME/Library/Keychains/login.keychain-db"
+          BEFORE=""
+          if [ -f "$RUNNER_TEMP/keychains-before.txt" ]; then
+            BEFORE=$(tr -d '"' < "$RUNNER_TEMP/keychains-before.txt" | tr '\n' ' ')
+          fi
+          case "$BEFORE" in *login.keychain*) : ;; *) BEFORE="$BEFORE $LOGIN" ;; esac
+          security list-keychains -d user -s $BEFORE || \
+            security list-keychains -d user -s "$LOGIN" || true
+          [ -n "$KC" ] && security delete-keychain "$KC" 2>/dev/null || true
+          rm -rf build DerivedData || true
+
+      - name: Make the build installable
+        # Uploading is not enough — a build nobody can install is not a release.
+        # Waits for processing, then attaches to every beta group.
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run "${{ inputs.attach_workflow }}" \
+            --repo "${{ github.repository }}" --ref main \
+            -f build_number="${{ github.run_number }}"

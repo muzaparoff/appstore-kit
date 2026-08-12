@@ -1,0 +1,233 @@
+name: 🧪 CI (kit)
+
+# Reusable build+test+auto-semver workflow. Callers provide the project and
+# scheme; everything else — Xcode/simulator picking, warning gate, version
+# bump from conventional commits, release dispatch — is shared.
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: "Path to the .xcodeproj"
+        type: string
+        required: true
+      scheme:
+        description: "Scheme to build and test"
+        type: string
+        required: true
+      release_workflow:
+        description: "Caller workflow file to dispatch after tagging"
+        type: string
+        default: "release.yml"
+      site_notes_workflow:
+        description: "Caller workflow to dispatch with the new tag (empty = skip)"
+        type: string
+        default: ""
+
+jobs:
+  test:
+    name: Build & Test
+    # Self-hosted: GitHub bills zero minutes for jobs on our own hardware, and this
+    # Mac carries a newer Xcode than any hosted image. Labels are matched
+    # case-insensitively, so macos matches the runner's auto label macOS.
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # These apps target iOS 26, which needs Xcode 26. Fail loudly and early if the
+      # runner image doesn't have it — a cryptic SDK error 20 minutes into a build
+      # wastes far more time than this check.
+      - name: Select Xcode 26 with a working simulator
+        run: |
+          # Two constraints, learned the hard way: images name these
+          # Xcode_26.0.1.app (never Xcode_26.app), and the newest Xcode on an image
+          # sometimes ships without its iOS simulator runtime — hardcoding a device
+          # name then falls back to "My Mac" and dies. Walk newest→oldest and take
+          # the first Xcode that actually has an iPhone simulator, remembering the
+          # device's real name for the test step.
+          # Hosted images use Xcode_26.x.app; a real Mac has /Applications/Xcode.app.
+          for XC in $(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -rV) /Applications/Xcode.app; do
+            [ -d "$XC" ] || continue
+            # No sudo: a personal Mac has no passwordless sudo, and a self-hosted
+            # runner died exactly there. DEVELOPER_DIR selects Xcode per-process,
+            # and exporting it pins every later step to the same Xcode.
+            export DEVELOPER_DIR="$XC/Contents/Developer"
+            # Resolve a UDID, not a name: two runtimes can host same-named devices
+            # (e.g. "iPhone 17 Pro" on iOS 26.4 AND 26.5), and a by-name
+            # destination then fails with "unable to find a device matching" —
+            # which killed the v1.11.1 hotfix run. A UDID is unambiguous.
+            UDID=$(xcrun simctl list devices available 2>/dev/null \
+                   | grep -E "^\s+iPhone" | grep -oE "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}" | head -1)
+            if [ -n "$UDID" ]; then
+              echo "Using $XC with simulator $UDID"
+              echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+              echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+              xcodebuild -version
+              exit 0
+            fi
+            echo "$XC has no iPhone simulators, trying older…"
+          done
+          echo "::error::No Xcode 26 with an iPhone simulator on this runner."
+          xcrun simctl list devices available 2>/dev/null | head -20 || true
+          exit 1
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project "${{ inputs.project }}" \
+            -scheme "${{ inputs.scheme }}" \
+            -destination "platform=iOS Simulator,id=$SIM_UDID" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee build.log | tail -40
+          # No xcpretty: it isn't on a service PATH, and the tests actually PASSED
+          # on the runner while the missing formatter failed the step. With pipefail,
+          # xcodebuild's own status is what this step exits with; the full log is in
+          # build.log and the xcresult bundle.
+
+      - name: Fail on any warning
+        run: |
+          # Counted from the build log above rather than by building again — macOS
+          # minutes bill at 10x, and a second full build to count warnings doubles
+          # the cost of every CI run.
+          COUNT=$(grep -c "warning:" build.log || true)
+          echo "warnings: $COUNT"
+          [ "$COUNT" -eq 0 ] || { echo "::error::$COUNT compiler warning(s)"; grep "warning:" build.log | head -20; exit 1; }
+
+      - name: Clean workspace
+        if: always()
+        run: |
+          # Self-hosted workspaces persist between runs; hosted VMs threw this away
+          # for free. TestResults is uploaded (on failure) before this deletes it.
+          rm -rf DerivedData build || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results
+          # build.log too: xcpretty swallows the real error, so a bare exit code is
+          # all that survives otherwise — which is what happened on 8ffff02.
+          path: |
+            TestResults.xcresult
+            build.log
+
+  # ---------------------------------------------------------------------------
+  # Auto-tag: derive the next semantic version from conventional commits and push
+  # the tag, which is what triggers the release workflow. Runs only after tests
+  # pass, so a tag always points at a green commit.
+  # ---------------------------------------------------------------------------
+  tag:
+    name: Tag next version
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Hosted Linux is behind the same billing wall as hosted macOS; this job is just
+    # git + gh and runs fine on the Mac runner.
+    runs-on: [self-hosted, macos]
+    permissions:
+      contents: write
+      actions: write      # needed to dispatch the release workflow
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # need full history and tags to compute the bump
+
+      - name: Compute next version
+        id: bump
+        run: |
+          LAST=$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
+          if [ -z "$LAST" ]; then LAST="v0.0.0"; fi
+          echo "last tag: $LAST"
+
+          RANGE="$LAST..HEAD"
+          git rev-parse "$LAST" >/dev/null 2>&1 || RANGE="HEAD"
+          SUBJECTS=$(git log --format='%s%n%b' $RANGE)
+
+          if [ -z "$(git log --format=%H $RANGE)" ]; then
+            echo "nothing new since $LAST"
+            echo "skip=true" >> $GITHUB_OUTPUT; exit 0
+          fi
+
+          # Conventional commits decide the bump:
+          #   BREAKING CHANGE / type!  -> major
+          #   feat:                    -> minor
+          #   anything else            -> patch
+          if echo "$SUBJECTS" | grep -qE '^BREAKING CHANGE|^[a-z]+(\(.+\))?!:'; then
+            LEVEL=major
+          elif echo "$SUBJECTS" | grep -qE '^feat(\(.+\))?:'; then
+            LEVEL=minor
+          else
+            LEVEL=patch
+          fi
+
+          V=${LAST#v}
+          MAJ=${V%%.*}; REST=${V#*.}; MIN=${REST%%.*}; PAT=${REST#*.}
+          case $LEVEL in
+            major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN+1)); PAT=0 ;;
+            patch) PAT=$((PAT+1)) ;;
+          esac
+          NEXT="v$MAJ.$MIN.$PAT"
+
+          echo "bump=$LEVEL  next=$NEXT"
+          echo "level=$LEVEL" >> $GITHUB_OUTPUT
+          echo "next=$NEXT"   >> $GITHUB_OUTPUT
+          echo "### Release $NEXT ($LEVEL)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Write the version into the repo, then tag it
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          NEXT="${{ steps.bump.outputs.next }}"
+          V="${NEXT#v}"
+
+          # Keep the repo and the tag in step. Info.plist reads $(MARKETING_VERSION),
+          # so updating the build settings is enough — but they must be committed, or
+          # the checked-in version silently disagrees with every released tag.
+          # perl, not sed -i: GNU and BSD sed disagree on -i, and this job moved from
+          # Ubuntu to a Mac. Only the committed pbxproj is written — project.yml is
+          # reference-only and writing it would recreate the dual-source drift.
+          perl -pi -e "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = $V;/g" \
+            ${{ inputs.project }}/project.pbxproj
+
+          echo "project.pbxproj -> $(grep -m1 'MARKETING_VERSION' ${{ inputs.project }}/project.pbxproj)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ inputs.project }}/project.pbxproj
+
+          # [skip ci] or this commit retriggers CI, which would tag again, forever.
+          git commit -m "chore(release): $NEXT [skip ci]" || echo "version already current"
+          git push origin HEAD:main
+
+          # Tag the commit that carries the version, so a checkout of the tag builds
+          # exactly the version the tag claims.
+          git tag -a "$NEXT" -m "Release $NEXT (${{ steps.bump.outputs.level }})"
+          git push origin "$NEXT"
+          echo "Tagged $NEXT" >> $GITHUB_STEP_SUMMARY
+
+      - name: Start the release
+        if: steps.bump.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag pushed with GITHUB_TOKEN does NOT fire `on: push: tags:` — GitHub
+          # suppresses workflow triggers from its own token to prevent recursion. So
+          # v1.0.1 and v1.0.2 were tagged and then nothing happened. Dispatching
+          # explicitly is exempt from that rule and needs no extra secret.
+          gh workflow run "${{ inputs.release_workflow }}" \
+            --repo "${{ github.repository }}" \
+            --ref "${{ steps.bump.outputs.next }}" \
+            -f dry_run=false
+          echo "Release dispatched for ${{ steps.bump.outputs.next }}" >> $GITHUB_STEP_SUMMARY
+
+          # Publish this release's notes to the app's public website, if the
+          # caller has one wired up.
+          if [ -n "${{ inputs.site_notes_workflow }}" ]; then
+            gh workflow run "${{ inputs.site_notes_workflow }}" \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              -f tag="${{ steps.bump.outputs.next }}"
+            echo "Site notes dispatched for ${{ steps.bump.outputs.next }}" >> $GITHUB_STEP_SUMMARY
+          fi

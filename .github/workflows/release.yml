@@ -34,6 +34,14 @@ on:
         description: "Archive and export only — do NOT upload"
         type: boolean
         default: false
+      build_number_offset:
+        description: "Added to run_number (continuity with a pre-kit build counter)"
+        type: number
+        default: 0
+      cloudkit_container:
+        description: "iCloud container to schema-promote before upload (empty = skip)"
+        type: string
+        default: ""
     secrets:
       APPLE_TEAM_ID: {required: true}
       IOS_CERTIFICATE_BASE64: {required: true}
@@ -49,14 +57,6 @@ on:
       ISSUER_ID: {required: true}
       APP_STORE_CONNECT_API_KEY_BASE64: {required: true}
       CLOUDKIT_MANAGEMENT_TOKEN: {required: false}
-      build_number_offset:
-        description: "Added to run_number (continuity with a pre-kit build counter)"
-        type: number
-        default: 0
-      cloudkit_container:
-        description: "iCloud container to schema-promote before upload (empty = skip)"
-        type: string
-        default: ""
 
 jobs:
   testflight:

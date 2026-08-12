@@ -172,10 +172,15 @@ jobs:
 
       - name: Export IPA
         run: |
+          # exportArchive re-signs and does its own identity match, hitting the
+          # same multi-cert ambiguity the archive step does. Pin the same
+          # imported identity by injecting it into a copy of the export options.
+          cp "${{ inputs.export_plist }}" "$RUNNER_TEMP/export-options.plist"
+          plutil -replace signingCertificate -string "$CERT_SHA" "$RUNNER_TEMP/export-options.plist"
           xcodebuild -exportArchive \
             -archivePath "build/${{ inputs.app_name }}.xcarchive" \
             -exportPath build/export \
-            -exportOptionsPlist "${{ inputs.export_plist }}"
+            -exportOptionsPlist "$RUNNER_TEMP/export-options.plist"
           ls -la build/export
 
       - name: Upload to TestFlight

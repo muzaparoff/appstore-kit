@@ -14,6 +14,10 @@ on:
         description: "Scheme to build and test"
         type: string
         required: true
+      pre_build:
+        description: "Shell command run after checkout (e.g. 'xcodegen generate')"
+        type: string
+        default: ""
       release_workflow:
         description: "Caller workflow file to dispatch after tagging"
         type: string
@@ -42,6 +46,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pre-build
+        if: ${{ inputs.pre_build != '' }}
+        run: ${{ inputs.pre_build }}
 
       # These apps target iOS 26, which needs Xcode 26. Fail loudly and early if the
       # runner image doesn't have it — a cryptic SDK error 20 minutes into a build

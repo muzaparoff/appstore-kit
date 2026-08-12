@@ -109,6 +109,17 @@ jobs:
           security list-keychains -d user -s "$KC" $OLD
           security find-identity -v -p codesigning "$KC"
 
+          # Pin the exact identity we just imported. The login keychain can
+          # accumulate other "Apple Distribution" certs (one appeared there the
+          # day another app's signing was set up), and Xcode's by-name match
+          # then picks an arbitrary one — including certs absent from this
+          # app's profiles, failing the archive. The temp keychain holds
+          # exactly one identity: ours.
+          CERT_SHA=$(security find-identity -v -p codesigning "$KC" \
+                     | awk '/Apple Distribution/{print $2; exit}')
+          [ -n "$CERT_SHA" ] || { echo "::error::No distribution identity in the imported p12"; exit 1; }
+          echo "CERT_SHA=$CERT_SHA" >> "$GITHUB_ENV"
+
       - name: Install provisioning profiles
         env:
           PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
@@ -152,6 +163,7 @@ jobs:
             CURRENT_PROJECT_VERSION=$BUILD_NUMBER \
             MARKETING_VERSION=$MARKETING_VERSION \
             OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
+            CODE_SIGN_IDENTITY="$CERT_SHA" \
             2>&1 | tee archive.log | tail -30
           # Signing style, identity, team, and per-target profile names live in
           # the pbxproj Release configs — a CLI override here would clobber the

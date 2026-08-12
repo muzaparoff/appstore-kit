@@ -1,0 +1,49 @@
+name: Store release
+description: >
+  Stages the App Store listing (metadata, screenshots, build) via the ASC API
+  and optionally submits it for review. Runs the kit's python scripts, so
+  callers need no local copies.
+inputs:
+  asc_app_id:
+    description: "Numeric App Store Connect app id"
+    required: true
+  version:
+    description: "Marketing version to stage (e.g. 1.2.1)"
+    required: true
+  build_number:
+    description: "Build number to attach"
+    required: true
+  submit:
+    description: "Also submit for review after staging"
+    required: false
+    default: "false"
+  meta_dir:
+    description: "fastlane-layout metadata dir in the caller repo"
+    required: false
+    default: "fastlane/metadata"
+  shots_dir:
+    description: "6.9-inch screenshots dir in the caller repo (empty = skip screenshots)"
+    required: false
+    default: "fastlane/screenshots/en-US"
+runs:
+  using: composite
+  steps:
+    - name: Stage listing (and optionally submit)
+      shell: bash
+      env:
+        ASC_APP_ID: ${{ inputs.asc_app_id }}
+        META_DIR: ${{ inputs.meta_dir }}
+        SHOTS_DIR: ${{ inputs.shots_dir }}
+      run: |
+        # ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_B64 come from the calling
+        # workflow's env (standard secret names).
+        python3 -m venv "$RUNNER_TEMP/venv"
+        "$RUNNER_TEMP/venv/bin/pip" install --quiet PyJWT cryptography
+        export ASC_KEY_PATH="$RUNNER_TEMP/asc_key.p8"
+        echo "$ASC_KEY_B64" | base64 --decode > "$ASC_KEY_PATH"
+        "$RUNNER_TEMP/venv/bin/python3" "${{ github.action_path }}/stage_listing.py" \
+          "${{ inputs.version }}" "${{ inputs.build_number }}"
+        if [ "${{ inputs.submit }}" = "true" ]; then
+          "$RUNNER_TEMP/venv/bin/python3" "${{ github.action_path }}/submit_for_review.py"
+        fi
+        rm -f "$ASC_KEY_PATH"

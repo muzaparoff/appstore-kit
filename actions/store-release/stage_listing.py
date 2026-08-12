@@ -62,9 +62,17 @@ def main():
     editable = [v for v in versions
                 if v["attributes"]["appStoreState"] in
                 ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED")]
-    if not editable:
-        raise SystemExit("No editable app store version found.")
-    vid = editable[0]["id"]
+    if editable:
+        vid = editable[0]["id"]
+    else:
+        # An app whose previous version shipped has no editable version yet —
+        # create the next one.
+        created = req("POST", "/appStoreVersions", {"data": {
+            "type": "appStoreVersions",
+            "attributes": {"platform": "IOS", "versionString": version_string},
+            "relationships": {"app": {"data": {"type": "apps", "id": APP_ID}}}}})
+        vid = created["data"]["id"]
+        print(f"created new store version {version_string}")
     req("PATCH", f"/appStoreVersions/{vid}", {"data": {
         "type": "appStoreVersions", "id": vid,
         "attributes": {"versionString": version_string,
@@ -132,7 +140,12 @@ def main():
         {"data": {"type": "builds", "id": builds[0]["id"]}})
     print(f"5/6 build {build_number} attached")
 
-    # 6. Screenshots: replace the 6.9" set with marketing/appstore finals.
+    # 6. Screenshots: replace the 6.9" set — skipped when no dir is provided
+    #    (keeps the previously uploaded set).
+    if not os.environ.get("SHOTS_DIR") or not SHOTS.is_dir():
+        print("6/6 screenshots skipped (no SHOTS_DIR)")
+        print("\nStaging complete.")
+        return
     sets = req("GET", f"/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")["data"]
     target = next((s for s in sets
                    if s["attributes"]["screenshotDisplayType"] == "APP_IPHONE_67"), None)

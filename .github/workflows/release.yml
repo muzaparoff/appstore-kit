@@ -34,6 +34,10 @@ on:
         description: "Added to run_number (continuity with a pre-kit build counter)"
         type: number
         default: 0
+      cloudkit_container:
+        description: "iCloud container to schema-promote before upload (empty = skip)"
+        type: string
+        default: ""
 
 jobs:
   testflight:
@@ -187,6 +191,33 @@ jobs:
             -exportPath build/export \
             -exportOptionsPlist "$RUNNER_TEMP/export-options.plist"
           ls -la build/export
+
+      - name: Promote CloudKit schema to Production
+        # TestFlight and App Store builds use the PRODUCTION CloudKit
+        # environment: the schema must be promoted before users get a build
+        # that writes new record fields, or sync fails in the field.
+        if: ${{ inputs.cloudkit_container != '' && inputs.dry_run != true }}
+        env:
+          CLOUDKIT_MANAGEMENT_TOKEN: ${{ secrets.CLOUDKIT_MANAGEMENT_TOKEN }}
+          CONTAINER_ID: ${{ inputs.cloudkit_container }}
+        run: |
+          if [ -z "$CLOUDKIT_MANAGEMENT_TOKEN" ]; then
+            echo "::warning::CLOUDKIT_MANAGEMENT_TOKEN not set — schema NOT promoted. Promote manually in CloudKit Console."
+            exit 0
+          fi
+          xcrun cktool export-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+            --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
+            --environment development --output-file ckschema-dev.ckdb
+          xcrun cktool validate-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+            --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
+            --environment production --file ckschema-dev.ckdb
+          # Idempotent — no-op when unchanged. If Development is stale, run a
+          # DEBUG build with iCloud first (initializeCloudKitSchema is DEBUG-only).
+          xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+            --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
+            --environment production --file ckschema-dev.ckdb
+          rm -f ckschema-dev.ckdb
+          echo "CloudKit schema promoted for $CONTAINER_ID"
 
       - name: Upload to TestFlight
         # Skipped on a dry run. Everything before this — certificate import, profile

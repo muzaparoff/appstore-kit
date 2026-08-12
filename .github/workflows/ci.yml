@@ -22,6 +22,10 @@ on:
         description: "Caller workflow to dispatch with the new tag (empty = skip)"
         type: string
         default: ""
+      warnings_gate:
+        description: "Fail the build on any compiler warning"
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -88,6 +92,7 @@ jobs:
           # build.log and the xcresult bundle.
 
       - name: Fail on any warning
+        if: ${{ inputs.warnings_gate }}
         run: |
           # Counted from the build log above rather than by building again — macOS
           # minutes bill at 10x, and a second full build to count warnings doubles

@@ -26,6 +26,10 @@ on:
         description: "Fail the build on any compiler warning"
         type: boolean
         default: true
+      run_tests:
+        description: "Run tests (false = build only, for apps whose test runner is broken)"
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -79,7 +83,12 @@ jobs:
       - name: Build and test
         run: |
           set -o pipefail
-          xcodebuild test \
+          # Build-only mode preserves legacy CI behavior for apps whose test
+          # runner is broken; the destination is still a simulator so the
+          # compile covers the same SDK/arch as a test run would.
+          ACTION=test
+          if [ "${{ inputs.run_tests }}" = "false" ]; then ACTION=build; fi
+          xcodebuild "$ACTION" \
             -project "${{ inputs.project }}" \
             -scheme "${{ inputs.scheme }}" \
             -destination "platform=iOS Simulator,id=$SIM_UDID" \

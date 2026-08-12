@@ -23,6 +23,10 @@ on:
       shots_dir:
         type: string
         default: "fastlane/screenshots/en-US"
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID: {required: true}
+      ISSUER_ID: {required: true}
+      APP_STORE_CONNECT_API_KEY_BASE64: {required: true}
 
 jobs:
   store:

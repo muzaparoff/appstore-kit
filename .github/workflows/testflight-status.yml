@@ -9,6 +9,10 @@ on:
       bundle_id:
         type: string
         required: true
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID: {required: true}
+      ISSUER_ID: {required: true}
+      APP_STORE_CONNECT_API_KEY_BASE64: {required: true}
 
 jobs:
   status:

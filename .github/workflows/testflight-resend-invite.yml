@@ -13,6 +13,10 @@ on:
         description: "Tester email to re-invite"
         type: string
         required: true
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID: {required: true}
+      ISSUER_ID: {required: true}
+      APP_STORE_CONNECT_API_KEY_BASE64: {required: true}
 
 jobs:
   resend:

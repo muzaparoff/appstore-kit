@@ -198,7 +198,6 @@ jobs:
             CURRENT_PROJECT_VERSION=$BUILD_NUMBER \
             MARKETING_VERSION=$MARKETING_VERSION \
             OTHER_CODE_SIGN_FLAGS="--keychain $KC" \
-            CODE_SIGN_IDENTITY="$CERT_SHA" \
             2>&1 | tee archive.log | tail -30
           # Signing style, identity, team, and per-target profile names live in
           # the pbxproj Release configs — a CLI override here would clobber the

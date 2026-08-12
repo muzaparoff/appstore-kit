@@ -71,6 +71,32 @@ jobs:
       TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       
     steps:
+      - name: Acquire the machine-wide signing lock
+        run: |
+          # Four repos share this Mac, and their release jobs all mutate the
+          # user keychain search list. Per-repo concurrency groups cannot
+          # serialize across repos — two overlapping releases corrupted each
+          # other's signing (errSecInternalComponent, 2026-08-12). One
+          # machine-level mutex; a lock older than 45 min is presumed dead.
+          LOCK=/tmp/appstore-kit-release.lock
+          for i in $(seq 1 240); do
+            if mkdir "$LOCK" 2>/dev/null; then
+              echo "${{ github.repository }} run ${{ github.run_id }}" > "$LOCK/owner"
+              echo "SIGNING_LOCK=$LOCK" >> "$GITHUB_ENV"
+              echo "lock acquired"
+              exit 0
+            fi
+            if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +45 2>/dev/null)" ]; then
+              echo "stealing stale lock from: $(cat "$LOCK/owner" 2>/dev/null || echo unknown)"
+              rm -rf "$LOCK"
+              continue
+            fi
+            [ $((i % 8)) -eq 0 ] && echo "waiting for $(cat "$LOCK/owner" 2>/dev/null || echo unknown)…"
+            sleep 15
+          done
+          echo "::error::Timed out waiting for the machine signing lock."
+          exit 1
+
       - uses: actions/checkout@v4
 
       - name: Pre-build
@@ -322,6 +348,7 @@ jobs:
             security list-keychains -d user -s "$LOGIN" || true
           [ -n "$KC" ] && security delete-keychain "$KC" 2>/dev/null || true
           rm -rf build DerivedData || true
+          [ -n "$SIGNING_LOCK" ] && rm -rf "$SIGNING_LOCK" || true
 
       - name: Make the build installable
         # Uploading is not enough — a build nobody can install is not a release.

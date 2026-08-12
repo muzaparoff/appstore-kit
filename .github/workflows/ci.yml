@@ -34,6 +34,10 @@ on:
         description: "Run tests (false = build only, for apps whose test runner is broken)"
         type: boolean
         default: true
+      version_file:
+        description: "File carrying MARKETING_VERSION (default: <project>/project.pbxproj; xcodegen repos: project.yml)"
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -205,19 +209,22 @@ jobs:
           V="${NEXT#v}"
 
           # Keep the repo and the tag in step. Info.plist reads $(MARKETING_VERSION),
-          # so updating the build settings is enough — but they must be committed, or
-          # the checked-in version silently disagrees with every released tag.
-          # perl, not sed -i: GNU and BSD sed disagree on -i, and this job moved from
-          # Ubuntu to a Mac. Only the committed pbxproj is written — project.yml is
-          # reference-only and writing it would recreate the dual-source drift.
-          perl -pi -e "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = $V;/g" \
-            ${{ inputs.project }}/project.pbxproj
+          # so updating the committed version source is enough — pbxproj for
+          # normal repos, project.yml for xcodegen repos (where the pbxproj is
+          # generated and gitignored). Both substitution patterns run; each is
+          # a no-op on the other format. perl, not sed -i: GNU and BSD sed
+          # disagree on -i, and this job moved from Ubuntu to a Mac.
+          VFILE="${{ inputs.version_file }}"
+          [ -z "$VFILE" ] && VFILE="${{ inputs.project }}/project.pbxproj"
+          perl -pi -e "s/MARKETING_VERSION = [^;]*;/MARKETING_VERSION = $V;/g;
+                       s/MARKETING_VERSION: \"[^\"]*\"/MARKETING_VERSION: \"$V\"/g" \
+            "$VFILE"
 
-          echo "project.pbxproj -> $(grep -m1 'MARKETING_VERSION' ${{ inputs.project }}/project.pbxproj)"
+          echo "$VFILE -> $(grep -m1 'MARKETING_VERSION' "$VFILE")"
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${{ inputs.project }}/project.pbxproj
+          git add "$VFILE"
 
           # [skip ci] or this commit retriggers CI, which would tag again, forever.
           git commit -m "chore(release): $NEXT [skip ci]" || echo "version already current"

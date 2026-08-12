@@ -175,11 +175,11 @@ def main():
     for shot in existing:
         req("DELETE", f"/appScreenshots/{shot['id']}")
     pngs = sorted(SHOTS.glob("*.png"))
-    framed = [p for p in pngs if p.stem.endswith("_framed")]
-    if framed:
-        # fastlane-frameit layout: prefer the framed marketing versions and
-        # ignore their raw siblings, matching deliver's behavior.
-        pngs = framed
+    # fastlane-frameit layout: a *_framed.png replaces its raw sibling;
+    # files without a framed counterpart (e.g. a hero composite) stay.
+    stems = {p.stem for p in pngs}
+    pngs = [p for p in pngs
+            if p.stem.endswith("_framed") or f"{p.stem}_framed" not in stems]
     order = []
     for png in pngs:
         blob = png.read_bytes()

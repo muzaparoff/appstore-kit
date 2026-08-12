@@ -15,9 +15,9 @@ on:
         type: string
         required: true
       site_repo:
-        description: "owner/repo of the public site (GitHub Pages from docs/)"
+        description: "owner/repo of a separate public site repo (empty = the app repo's own docs/)"
         type: string
-        required: true
+        default: ""
 
 jobs:
   publish:
@@ -45,14 +45,22 @@ jobs:
           SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          KEYFILE="$RUNNER_TEMP/site_deploy_key"
-          printf '%s\n' "$SITE_DEPLOY_KEY" > "$KEYFILE"
-          chmod 600 "$KEYFILE"
-          export GIT_SSH_COMMAND="ssh -i $KEYFILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-
-          SITE="$RUNNER_TEMP/site"
-          rm -rf "$SITE"
-          git clone --depth 1 "git@github.com:${{ inputs.site_repo }}.git" "$SITE"
+          if [ -n "${{ inputs.site_repo }}" ]; then
+            # Separate public site repo, pushed over a deploy key.
+            KEYFILE="$RUNNER_TEMP/site_deploy_key"
+            printf '%s\n' "$SITE_DEPLOY_KEY" > "$KEYFILE"
+            chmod 600 "$KEYFILE"
+            export GIT_SSH_COMMAND="ssh -i $KEYFILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+            SITE="$RUNNER_TEMP/site"
+            rm -rf "$SITE"
+            git clone --depth 1 "git@github.com:${{ inputs.site_repo }}.git" "$SITE"
+          else
+            # In-repo site: the app repo's own docs/ serves GitHub Pages. The
+            # checkout is at the release tag; switch to main to commit there.
+            git fetch origin main
+            git checkout -B main origin/main
+            SITE="$PWD"
+          fi
 
           TAG="${{ inputs.tag }}" DATE="${{ steps.notes.outputs.date }}" \
           python3 - "$SITE/docs/releases.json" <<'PY'
@@ -69,22 +77,23 @@ jobs:
           if not notes:
               print("No feat/fix commits in range; nothing to publish.")
               sys.exit(0)
-          releases = json.load(open(path))
+          releases = json.load(open(path)) if os.path.exists(path) else []
           releases = [r for r in releases if r["version"] != version]
           releases.insert(0, {"version": version, "date": date, "notes": notes[::-1]})
           releases.sort(key=lambda r: [int(x) for x in r["version"].split(".")], reverse=True)
+          os.makedirs(os.path.dirname(path), exist_ok=True)
           json.dump(releases, open(path, "w"), indent=1)
           print(f"Wrote {version} with {len(notes)} notes.")
           PY
 
           cd "$SITE"
-          if git diff --quiet; then
+          if git diff --quiet -- docs/releases.json 2>/dev/null && git ls-files --error-unmatch docs/releases.json >/dev/null 2>&1; then
             echo "releases.json unchanged; nothing to push."
             exit 0
           fi
           git config user.name "release-kit-ci"
           git config user.email "ci@release-kit.invalid"
           git add docs/releases.json
-          git commit -m "release notes: ${{ inputs.tag }}"
+          git commit -m "release notes: ${{ inputs.tag }} [skip ci]" || { echo "nothing to commit"; exit 0; }
           git push origin main
-          rm -f "$KEYFILE"
+          [ -n "${KEYFILE:-}" ] && rm -f "$KEYFILE" || true

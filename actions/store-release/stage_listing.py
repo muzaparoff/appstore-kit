@@ -76,11 +76,11 @@ def main():
             "relationships": {"app": {"data": {"type": "apps", "id": APP_ID}}}}})
         vid = created["data"]["id"]
         print(f"created new store version {version_string}")
+    version_attrs = {"versionString": version_string, "releaseType": "AFTER_APPROVAL"}
+    if text("copyright.txt"):
+        version_attrs["copyright"] = text("copyright.txt")
     req("PATCH", f"/appStoreVersions/{vid}", {"data": {
-        "type": "appStoreVersions", "id": vid,
-        "attributes": {"versionString": version_string,
-                       "copyright": (META / "copyright.txt").read_text().strip(),
-                       "releaseType": "AFTER_APPROVAL"}}})
+        "type": "appStoreVersions", "id": vid, "attributes": version_attrs}})
     print(f"1/6 version {version_string} attributes set ({vid})")
 
     # 2. Version localization (en-US): description, keywords, promo, URLs, notes.

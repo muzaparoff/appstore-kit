@@ -38,6 +38,16 @@ def req(method, path, body=None):
 
 def main():
     versions = req("GET", f"/apps/{APP_ID}/appStoreVersions")["data"]
+    # Guard: if a version is already with Apple, filing another submission is
+    # at best a no-op and at worst cancels/queues confusingly. Skip cleanly.
+    in_flight = [v for v in versions if v["attributes"]["appStoreState"] in
+                 ("WAITING_FOR_REVIEW", "IN_REVIEW", "PENDING_APPLE_RELEASE",
+                  "PENDING_DEVELOPER_RELEASE", "IN_REVIEW")]
+    if in_flight:
+        v = in_flight[0]["attributes"]
+        print(f"SKIP: version {v['versionString']} is already {v['appStoreState']} — "
+              "not submitting another. Re-run after Apple decides.")
+        return
     editable = next(v for v in versions
                     if v["attributes"]["appStoreState"] in
                     ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",

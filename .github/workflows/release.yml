@@ -247,6 +247,19 @@ jobs:
         # TestFlight and App Store builds use the PRODUCTION CloudKit
         # environment: the schema must be promoted before users get a build
         # that writes new record fields, or sync fails in the field.
+        #
+        # This step is best-effort, not a release gate. cktool's
+        # import-schema (and validate-schema) reject --environment
+        # production outright for a container that already has production
+        # history: "BadRequestException: endpoint not applicable in the
+        # environment 'production'". There is no cktool subcommand that
+        # succeeds here (checked export/import/validate/reset) — Apple's
+        # only supported path for an established container is the
+        # CloudKit Console's "Deploy Schema Changes" button, a diff-and-push
+        # action with no API/CLI equivalent. So: try it in case Apple adds
+        # API support later or this turns out to be container-specific, but
+        # never fail the release over it — warn and let the archive/upload
+        # steps run regardless.
         if: ${{ inputs.cloudkit_container != '' && inputs.dry_run != true }}
         env:
           CLOUDKIT_MANAGEMENT_TOKEN: ${{ secrets.CLOUDKIT_MANAGEMENT_TOKEN }}
@@ -259,20 +272,16 @@ jobs:
           xcrun cktool export-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
             --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
             --environment development --output-file ckschema-dev.ckdb
-          # cktool's validate-schema endpoint only accepts --environment
-          # development — Apple's API rejects a production target outright
-          # ("endpoint not applicable in the environment 'production'"), so
-          # there is no separate pre-flight validation step against
-          # production. import-schema validates before applying, so a broken
-          # schema still fails loudly here, just without the extra round trip.
-          #
-          # Idempotent — no-op when unchanged. If Development is stale, run a
-          # DEBUG build with iCloud first (initializeCloudKitSchema is DEBUG-only).
-          xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+
+          if xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
             --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
-            --environment production --file ckschema-dev.ckdb
+            --environment production --file ckschema-dev.ckdb; then
+            echo "CloudKit schema promoted for $CONTAINER_ID"
+          else
+            echo "::warning::cktool can't write to $CONTAINER_ID's production schema via the API. Promote manually: CloudKit Console → $CONTAINER_ID → Schema → Deploy Schema Changes."
+          fi
+
           rm -f ckschema-dev.ckdb
-          echo "CloudKit schema promoted for $CONTAINER_ID"
 
       - name: Upload to TestFlight
         # Skipped on a dry run. Everything before this — certificate import, profile

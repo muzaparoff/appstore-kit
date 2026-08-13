@@ -259,9 +259,13 @@ jobs:
           xcrun cktool export-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
             --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
             --environment development --output-file ckschema-dev.ckdb
-          xcrun cktool validate-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
-            --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
-            --environment production --file ckschema-dev.ckdb
+          # cktool's validate-schema endpoint only accepts --environment
+          # development — Apple's API rejects a production target outright
+          # ("endpoint not applicable in the environment 'production'"), so
+          # there is no separate pre-flight validation step against
+          # production. import-schema validates before applying, so a broken
+          # schema still fails loudly here, just without the extra round trip.
+          #
           # Idempotent — no-op when unchanged. If Development is stale, run a
           # DEBUG build with iCloud first (initializeCloudKitSchema is DEBUG-only).
           xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \

@@ -25,7 +25,7 @@ exit-0-on-fatal-error, tag pushes that trigger nothing, and friends).
 ## Scripts (`scripts/`)
 
 - `stage_listing.py` — stages the full App Store listing via the ASC API:
-  version attributes, en-US copy, name/subtitle/privacy URL, categories,
+  version attributes, copy for every locale directory, name/subtitle/privacy URL, categories,
   build selection, 6.9" screenshots. Idempotent.
 - `submit_for_review.py` — files the review submission.
 - Config via env: `ASC_APP_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID`,

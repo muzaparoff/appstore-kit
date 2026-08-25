@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Config via env: ASC_APP_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH, META_DIR, SHOTS_DIR."""
 """Stages the Camipack App Store listing via the App Store Connect API:
-version metadata, localization copy, name/subtitle/privacy URL, categories,
+version metadata, localization copy for every locale directory under
+META_DIR, name/subtitle/privacy URL, categories,
 build selection, and the 6.9" screenshot set. Idempotent — safe to re-run.
 
 Leaves untouched (no public API / one-time human steps): the App Privacy
@@ -57,6 +58,66 @@ def text(p):
     return f.read_text().strip() if f.exists() else None
 
 
+PRIMARY = os.environ.get("PRIMARY_LOCALE", "en-US")
+
+# App Store Connect rejects an unknown locale with a 409 halfway through the
+# loop, having already written the ones before it. Checking names here turns a
+# typo'd directory into a local warning instead of a half-updated listing.
+ASC_LOCALES = {
+    "ar-SA", "ca", "cs", "da", "de-DE", "el", "en-AU", "en-CA", "en-GB", "en-US",
+    "es-ES", "es-MX", "fi", "fr-CA", "fr-FR", "he", "hi", "hr", "hu", "id",
+    "it", "ja", "ko", "ms", "nl-NL", "no", "pl", "pt-BR", "pt-PT", "ro", "ru",
+    "sk", "sv", "th", "tr", "uk", "vi", "zh-Hans", "zh-Hant",
+}
+
+# Apple's caps. Exceeding one is a 409 at write time, which is a bad place to
+# find out — every locale is checked before anything is sent.
+LIMITS = {
+    "name.txt": 30, "subtitle.txt": 30, "keywords.txt": 100,
+    "promotional_text.txt": 170, "description.txt": 4000, "release_notes.txt": 4000,
+}
+
+
+def discover_locales():
+    """Locale directories under META, primary first.
+
+    Only directories count, so copyright.txt and the category files at the root
+    are excluded without naming them. A sibling directory such as
+    fastlane/metadata-pending/ sits outside META entirely and is therefore
+    excluded structurally — that is load-bearing, since it is how deliberately
+    unpublished listings are parked.
+    """
+    found, skipped = [], []
+    for entry in sorted(META.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if entry.name in ("review_information", "trade_representative_contact_information"):
+            continue
+        (found if entry.name in ASC_LOCALES else skipped).append(entry.name)
+    for name in skipped:
+        print(f"  ! skipping '{name}': not an App Store Connect locale")
+    if PRIMARY in found:
+        found.remove(PRIMARY)
+        found.insert(0, PRIMARY)
+    return found
+
+
+def validate(locales):
+    """Every length checked before the first write.
+
+    Without this an over-long en-AU subtitle fails after en-US and en-GB have
+    already been sent, leaving the listing partly updated and the run red.
+    """
+    problems = []
+    for locale in locales:
+        for filename, cap in LIMITS.items():
+            value = text(f"{locale}/{filename}")
+            if value is not None and len(value) > cap:
+                problems.append(f"{locale}/{filename}: {len(value)}/{cap}")
+    if problems:
+        raise SystemExit("metadata too long:\n  " + "\n  ".join(problems))
+
+
 def main():
     version_string, build_number = sys.argv[1], sys.argv[2]
 
@@ -83,55 +144,82 @@ def main():
         "type": "appStoreVersions", "id": vid, "attributes": version_attrs}})
     print(f"1/6 version {version_string} attributes set ({vid})")
 
-    # 2. Version localization (en-US): description, keywords, promo, URLs, notes.
+    # 2. Version localizations: description, keywords, promo, URLs, notes —
+    #    for every locale directory, not only the primary one. Each storefront
+    #    localization carries its own keyword field, which is the whole reason
+    #    en-GB / en-AU / en-CA exist alongside en-US.
+    locales = discover_locales()
+    validate(locales)
     locs = req("GET", f"/appStoreVersions/{vid}/appStoreVersionLocalizations")["data"]
-    en = next((l for l in locs if l["attributes"]["locale"] == "en-US"), None)
-    loc_attrs = {k: v for k, v in {
-        "description": text("en-US/description.txt"),
-        "keywords": text("en-US/keywords.txt"),
-        "promotionalText": text("en-US/promotional_text.txt"),
-        "supportUrl": text("en-US/support_url.txt"),
-        "marketingUrl": text("en-US/marketing_url.txt"),
-        "whatsNew": text("en-US/release_notes.txt"),
-    }.items() if v is not None}
-    if en:
+    by_locale = {l["attributes"]["locale"]: l for l in locs}
+    # Computed once, from the pre-loop fetch: if step 1 created the version,
+    # `versions` is the stale list from before it existed, so a genuinely first
+    # release still evaluates true here. Every locale must agree on this.
+    first_release = len(versions) == 1
+    written = {}
+
+    for locale in locales:
+        loc_attrs = {k: v for k, v in {
+            "description": text(f"{locale}/description.txt"),
+            "keywords": text(f"{locale}/keywords.txt"),
+            "promotionalText": text(f"{locale}/promotional_text.txt"),
+            "supportUrl": text(f"{locale}/support_url.txt"),
+            "marketingUrl": text(f"{locale}/marketing_url.txt"),
+            "whatsNew": text(f"{locale}/release_notes.txt"),
+        }.items() if v is not None}
         # whatsNew is rejected by the API for a first-ever version.
-        first_release = len(versions) == 1
-        attrs = {k: v for k, v in loc_attrs.items() if not (first_release and k == "whatsNew")}
-        req("PATCH", f"/appStoreVersionLocalizations/{en['id']}", {"data": {
-            "type": "appStoreVersionLocalizations", "id": en["id"], "attributes": attrs}})
-        loc_id = en["id"]
-    else:
-        created = req("POST", "/appStoreVersionLocalizations", {"data": {
-            "type": "appStoreVersionLocalizations",
-            "attributes": {"locale": "en-US", **loc_attrs},
-            "relationships": {"appStoreVersion": {"data": {"type": "appStoreVersions", "id": vid}}}}})
-        loc_id = created["data"]["id"]
-    print("2/6 en-US version localization set")
+        attrs = {k: v for k, v in loc_attrs.items()
+                 if not (first_release and k == "whatsNew")}
+        existing = by_locale.get(locale)
+        if existing:
+            req("PATCH", f"/appStoreVersionLocalizations/{existing['id']}", {"data": {
+                "type": "appStoreVersionLocalizations", "id": existing["id"],
+                "attributes": attrs}})
+            written[locale] = existing["id"]
+        elif attrs:
+            created = req("POST", "/appStoreVersionLocalizations", {"data": {
+                "type": "appStoreVersionLocalizations",
+                "attributes": {"locale": locale, **attrs},
+                "relationships": {"appStoreVersion":
+                                  {"data": {"type": "appStoreVersions", "id": vid}}}}})
+            written[locale] = created["data"]["id"]
+        else:
+            print(f"  - {locale}: no metadata files, nothing to create")
+            continue
+        print(f"  · {locale} version localization set")
+
+    # Screenshots belong to one localization and SHOTS_DIR is the primary's, so
+    # this must be the primary id — resolved after the loop, because the
+    # localization may not have existed until this run created it.
+    loc_id = written.get(PRIMARY) or (by_locale.get(PRIMARY) or {}).get("id")
+    print(f"2/6 version localizations set ({len(written)}: {', '.join(written) or 'none'})")
 
     # 3. App-level info: name, subtitle, privacy policy URL.
     infos = req("GET", f"/apps/{APP_ID}/appInfos")["data"]
     info = next(i for i in infos if i["attributes"]["appStoreState"] != "READY_FOR_SALE")
     info_locs = req("GET", f"/appInfos/{info['id']}/appInfoLocalizations")["data"]
-    ien = next((l for l in info_locs if l["attributes"]["locale"] == "en-US"), None)
-    info_attrs = {k: v for k, v in {
-        "name": text("en-US/name.txt"),
-        "subtitle": text("en-US/subtitle.txt"),
-        "privacyPolicyUrl": text("en-US/privacy_url.txt")}.items() if v is not None}
-    if not info_attrs:
-        print("3/6 app info: nothing to set")
-        info_attrs = None
-    if info_attrs is None:
-        pass
-    elif ien:
-        req("PATCH", f"/appInfoLocalizations/{ien['id']}", {"data": {
-            "type": "appInfoLocalizations", "id": ien["id"], "attributes": info_attrs}})
-    else:
-        req("POST", "/appInfoLocalizations", {"data": {
-            "type": "appInfoLocalizations",
-            "attributes": {"locale": "en-US", **info_attrs},
-            "relationships": {"appInfo": {"data": {"type": "appInfos", "id": info["id"]}}}}})
-    print("3/6 name, subtitle, privacy URL set")
+    info_by_locale = {l["attributes"]["locale"]: l for l in info_locs}
+    named = []
+    for locale in locales:
+        info_attrs = {k: v for k, v in {
+            "name": text(f"{locale}/name.txt"),
+            "subtitle": text(f"{locale}/subtitle.txt"),
+            "privacyPolicyUrl": text(f"{locale}/privacy_url.txt")}.items() if v is not None}
+        if not info_attrs:
+            continue
+        existing = info_by_locale.get(locale)
+        if existing:
+            req("PATCH", f"/appInfoLocalizations/{existing['id']}", {"data": {
+                "type": "appInfoLocalizations", "id": existing["id"],
+                "attributes": info_attrs}})
+        else:
+            req("POST", "/appInfoLocalizations", {"data": {
+                "type": "appInfoLocalizations",
+                "attributes": {"locale": locale, **info_attrs},
+                "relationships": {"appInfo":
+                                  {"data": {"type": "appInfos", "id": info["id"]}}}}})
+        named.append(locale)
+    print(f"3/6 name, subtitle, privacy URL set ({len(named)}: {', '.join(named) or 'none'})")
 
     # 4. Categories (from metadata files; missing files keep current values).
     primary = text("primary_category.txt")
@@ -162,6 +250,12 @@ def main():
         print("6/6 screenshots skipped (no SHOTS_DIR)")
         print("\nStaging complete.")
         return
+    # Without this the screenshots would be posted against a null id, or worse
+    # against whichever localization happened to come back first — the primary
+    # is the only one SHOTS_DIR describes.
+    if not loc_id:
+        raise SystemExit(f"no '{PRIMARY}' localization to attach screenshots to; "
+                         f"expected metadata under {META / PRIMARY}")
     sets = req("GET", f"/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")["data"]
     target = next((s for s in sets
                    if s["attributes"]["screenshotDisplayType"] == "APP_IPHONE_67"), None)

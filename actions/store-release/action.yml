@@ -25,6 +25,10 @@ inputs:
     description: "6.9-inch screenshots dir in the caller repo (empty = skip screenshots)"
     required: false
     default: "fastlane/screenshots/en-US"
+  primary_locale:
+    description: "Locale written first, and the one that owns the screenshots"
+    required: false
+    default: "en-US"
 runs:
   using: composite
   steps:
@@ -34,6 +38,7 @@ runs:
         ASC_APP_ID: ${{ inputs.asc_app_id }}
         META_DIR: ${{ inputs.meta_dir }}
         SHOTS_DIR: ${{ inputs.shots_dir }}
+        PRIMARY_LOCALE: ${{ inputs.primary_locale }}
       run: |
         # ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_B64 come from the calling
         # workflow's env (standard secret names).

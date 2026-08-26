@@ -40,6 +40,17 @@ jobs:
           DATE=$(git log -1 --format=%cs "$TAG")
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
+          # The written App Store copy, when the app keeps one. Without it a
+          # public page shows conventional-commit subjects — "fix(flights):
+          # refuse an arrival prediction that contradicts the timetable" — which
+          # is honest, and addressed to whoever wrote it rather than to whoever
+          # is reading. The subjects stay underneath as the changelog.
+          : > /tmp/summary.txt
+          for CANDIDATE in fastlane/metadata/en-US/release_notes.txt \
+                           fastlane/metadata/en-GB/release_notes.txt; do
+            if [ -f "$CANDIDATE" ]; then cp "$CANDIDATE" /tmp/summary.txt; break; fi
+          done
+
       - name: Update releases.json on the site
         env:
           SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
@@ -74,16 +85,26 @@ jobs:
               if m:
                   text = m.group(3).strip()
                   notes.append({"type": m.group(1), "text": text[0].upper() + text[1:]})
-          if not notes:
-              print("No feat/fix commits in range; nothing to publish.")
+          try:
+              summary = open("/tmp/summary.txt").read().strip()
+          except OSError:
+              summary = ""
+          if not notes and not summary:
+              print("Nothing to publish for this range.")
               sys.exit(0)
           releases = json.load(open(path)) if os.path.exists(path) else []
           releases = [r for r in releases if r["version"] != version]
-          releases.insert(0, {"version": version, "date": date, "notes": notes[::-1]})
+          entry = {"version": version, "date": date, "notes": notes[::-1]}
+          # Optional on purpose: an app with no release_notes.txt keeps exactly
+          # the shape it had, so adding this cannot disturb a site that is not
+          # ready to render it.
+          if summary:
+              entry["summary"] = summary
+          releases.insert(0, entry)
           releases.sort(key=lambda r: [int(x) for x in r["version"].split(".")], reverse=True)
           os.makedirs(os.path.dirname(path), exist_ok=True)
           json.dump(releases, open(path, "w"), indent=1)
-          print(f"Wrote {version} with {len(notes)} notes.")
+          print(f"Wrote {version}: {len(notes)} notes, summary={bool(summary)}.")
           PY
 
           cd "$SITE"

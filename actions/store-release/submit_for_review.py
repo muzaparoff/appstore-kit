@@ -36,6 +36,51 @@ def req(method, path, body=None):
         raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{e.read().decode()[:600]}")
 
 
+def screenshot_states(vid):
+    """Every screenshot on this version, as (id, filename, delivery state).
+
+    Walks localizations -> sets -> screenshots. A version with no screenshots
+    at all yields nothing, which is a valid state: the caller may have run with
+    an empty shots_dir.
+    """
+    out = []
+    for loc in req("GET", f"/appStoreVersions/{vid}/appStoreVersionLocalizations").get("data", []):
+        for s in req("GET", f"/appStoreVersionLocalizations/{loc['id']}/appScreenshotSets").get("data", []):
+            for shot in req("GET", f"/appScreenshotSets/{s['id']}/appScreenshots").get("data", []):
+                a = shot["attributes"]
+                state = (a.get("assetDeliveryState") or {}).get("state")
+                out.append((shot["id"], a.get("fileName", "?"), state))
+    return out
+
+
+def await_screenshots(vid, timeout=900, interval=15):
+    """Block until Apple finishes ingesting every screenshot.
+
+    Uploading a screenshot returns immediately, but Apple processes it
+    asynchronously and refuses the submission with
+    STATE_ERROR.SCREENSHOT_UPLOADS_IN_PROGRESS while any are still in flight.
+    Staging and submitting run seconds apart, so that race lost every time.
+    """
+    deadline = time.time() + timeout
+    while True:
+        shots = screenshot_states(vid)
+        failed = [(n, s) for _, n, s in shots if s == "FAILED"]
+        if failed:
+            raise SystemExit("Apple rejected these screenshots: " +
+                             ", ".join(f"{n} ({s})" for n, s in failed))
+        pending = [(n, s) for _, n, s in shots if s != "COMPLETE"]
+        if not pending:
+            print(f"screenshots ready ({len(shots)} complete)")
+            return
+        if time.time() >= deadline:
+            raise SystemExit(
+                f"screenshots still processing after {timeout}s: " +
+                ", ".join(f"{n} ({s})" for n, s in pending[:5]))
+        print(f"   waiting on {len(pending)}/{len(shots)} screenshot(s): "
+              f"{pending[0][0]} is {pending[0][1]}")
+        time.sleep(interval)
+
+
 def main():
     versions = req("GET", f"/apps/{APP_ID}/appStoreVersions")["data"]
     # Guard: if a version is already with Apple, filing another submission is
@@ -53,6 +98,8 @@ def main():
                     ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
                      "METADATA_REJECTED"))
     vid, vstr = editable["id"], editable["attributes"]["versionString"]
+
+    await_screenshots(vid)
 
     # Reuse an open submission if one exists, else create.
     subs = req("GET", f"/reviewSubmissions?filter[app]={APP_ID}&filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES")

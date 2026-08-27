@@ -300,14 +300,23 @@ jobs:
           IPA=$(ls build/export/*.ipa | head -1)
 
           # altool can exit 0 while reporting a fatal error in its output, which once
-          # made a failed upload look like a successful release. Inspect the output,
-          # not just the exit status.
+          # made a failed upload look like a successful release — so the exit status
+          # alone is not enough. But altool also logs, and then retries past,
+          # transient 500s from Apple's CDN, and a lone "ERROR:" line is not a
+          # rejection: v1.52.0 was marked failed by this check after the build had
+          # already been delivered. Trust altool's own closing verdict where it
+          # prints one, and scan for errors only when there is no verdict at all.
           check() {
-            if grep -qiE "UPLOAD FAILED|ERROR:|Validation failed" "$1"; then
-              echo "::error::$2 rejected by App Store Connect"
-              grep -iE "ERROR:|detail :" "$1" | head -5
-              return 1
+            if grep -qE "(UPLOAD|VERIFY) SUCCEEDED with no errors" "$1"; then
+              if grep -qE "ERROR:" "$1"; then
+                echo "::notice::$2 succeeded; altool retried past transient errors:"
+                grep -E "ERROR:" "$1" | head -3
+              fi
+              return 0
             fi
+            echo "::error::$2 rejected by App Store Connect"
+            grep -iE "UPLOAD FAILED|VERIFY FAILED|ERROR:|detail :" "$1" | head -5
+            return 1
           }
 
           set +e

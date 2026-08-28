@@ -48,13 +48,26 @@ jobs:
                              headers=H).json()["data"][0]
           print(f"App: {app['attributes']['name']} (id {app['id']})")
 
-          subs = requests.get(f"{API}/reviewSubmissions", headers=H, params={
-              "filter[app]": app["id"],
-              "filter[state]": "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES"
-          }).json().get("data", [])
+          # Diagnostic: show every submission's true current state before
+          # filtering, so a "nothing to cancel" result is provably correct
+          # rather than a filter/timing mismatch.
+          all_subs = requests.get(f"{API}/reviewSubmissions", headers=H,
+                                   params={"filter[app]": app["id"]}).json().get("data", [])
+          print(f"All review submissions for this app ({len(all_subs)}):")
+          for s in all_subs:
+              print(f"  {s['id']}  state={s['attributes']['state']}  platform={s['attributes'].get('platform')}")
+
+          versions = requests.get(f"{API}/apps/{app['id']}/appStoreVersions", headers=H).json().get("data", [])
+          print(f"All app store versions ({len(versions)}):")
+          for v in versions:
+              a = v["attributes"]
+              print(f"  {v['id']}  version={a.get('versionString')}  appStoreState={a.get('appStoreState')}")
+
+          cancelable = {"READY_FOR_REVIEW", "WAITING_FOR_REVIEW", "IN_REVIEW", "UNRESOLVED_ISSUES"}
+          subs = [s for s in all_subs if s["attributes"]["state"] in cancelable]
 
           if not subs:
-              print("::error::No open review submission found (nothing WAITING_FOR_REVIEW/IN_REVIEW/UNRESOLVED_ISSUES) — nothing to cancel.")
+              print("::error::No open review submission found (nothing WAITING_FOR_REVIEW/IN_REVIEW/UNRESOLVED_ISSUES) — nothing to cancel. See the listing above for the true current state.")
               raise SystemExit(1)
 
           for sub in subs:

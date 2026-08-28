@@ -1,0 +1,71 @@
+name: 🛑 Cancel App Review (kit)
+
+# Withdraws a review submission that's still WAITING_FOR_REVIEW / IN_REVIEW /
+# UNRESOLVED_ISSUES, per Apple's documented "cancel a review submission"
+# action (PATCH reviewSubmissions with canceled:true). Does nothing (and
+# fails loudly) if no such submission exists, rather than silently no-op-ing
+# on a stale/wrong state.
+on:
+  workflow_call:
+    inputs:
+      bundle_id:
+        type: string
+        required: true
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID: {required: true}
+      ISSUER_ID: {required: true}
+      APP_STORE_CONNECT_API_KEY_BASE64: {required: true}
+
+jobs:
+  cancel:
+    runs-on: [self-hosted, macos]
+    steps:
+      - name: Cancel the open review submission
+        env:
+          KEY_ID:    ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.ISSUER_ID }}
+          KEY_B64:   ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          # Homebrew's python refuses global installs (PEP 668); a per-run venv in
+          # RUNNER_TEMP works on the self-hosted Mac and hosted images alike.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet pyjwt cryptography requests
+          echo "$KEY_B64" | base64 --decode > /tmp/key.p8
+          "$RUNNER_TEMP/venv/bin/python3" <<'PY'
+          import os, time, jwt, requests
+
+          tok = jwt.encode(
+              {"iss": os.environ["ISSUER_ID"], "iat": int(time.time()),
+               "exp": int(time.time()) + 900, "aud": "appstoreconnect-v1"},
+              open('/tmp/key.p8').read(), algorithm="ES256",
+              headers={"kid": os.environ["KEY_ID"], "typ": "JWT"})
+          H = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+          API = "https://api.appstoreconnect.apple.com/v1"
+
+          app = requests.get(f"{API}/apps",
+                             params={"filter[bundleId]": os.environ["BUNDLE_ID"]},
+                             headers=H).json()["data"][0]
+          print(f"App: {app['attributes']['name']} (id {app['id']})")
+
+          subs = requests.get(f"{API}/reviewSubmissions", headers=H, params={
+              "filter[app]": app["id"],
+              "filter[state]": "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES"
+          }).json().get("data", [])
+
+          if not subs:
+              print("::error::No open review submission found (nothing WAITING_FOR_REVIEW/IN_REVIEW/UNRESOLVED_ISSUES) — nothing to cancel.")
+              raise SystemExit(1)
+
+          for sub in subs:
+              state = sub["attributes"]["state"]
+              print(f"Canceling submission {sub['id']} (state={state})")
+              r = requests.patch(f"{API}/reviewSubmissions/{sub['id']}", headers=H, json={
+                  "data": {"type": "reviewSubmissions", "id": sub["id"],
+                           "attributes": {"canceled": True}}})
+              if r.status_code not in (200, 204):
+                  print(f"::error::cancel failed: {r.status_code} {r.text[:400]}")
+                  raise SystemExit(1)
+              print(f"Canceled submission {sub['id']}.")
+          PY
+          rm -f /tmp/key.p8

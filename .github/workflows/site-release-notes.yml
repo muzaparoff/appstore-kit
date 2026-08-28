@@ -51,6 +51,20 @@ jobs:
             if [ -f "$CANDIDATE" ]; then cp "$CANDIDATE" /tmp/summary.txt; break; fi
           done
 
+          # And the same copy in every other language the app is written in.
+          # These already exist — an app that localises its listing writes them
+          # for the App Store — and until now they were read past in favour of
+          # en-US, so a Russian reader got a Russian store page and an English
+          # site. First candidate wins per language, matching the loop above.
+          for PAIR in "es:es-ES es-MX" "pt:pt-PT pt-BR" "ru:ru" \
+                      "fr:fr-FR fr-CA" "de:de-DE" "it:it" "nl:nl-NL"; do
+            CODE="${PAIR%%:*}"
+            for LOCALE in ${PAIR#*:}; do
+              F="fastlane/metadata/$LOCALE/release_notes.txt"
+              if [ -f "$F" ]; then cp "$F" "/tmp/summary.$CODE.txt"; break; fi
+            done
+          done
+
       - name: Update releases.json on the site
         env:
           SITE_DEPLOY_KEY: ${{ secrets.SITE_DEPLOY_KEY }}
@@ -85,10 +99,17 @@ jobs:
               if m:
                   text = m.group(3).strip()
                   notes.append({"type": m.group(1), "text": text[0].upper() + text[1:]})
-          try:
-              summary = open("/tmp/summary.txt").read().strip()
-          except OSError:
-              summary = ""
+          def read(path):
+              try:
+                  return open(path, encoding="utf-8").read().strip()
+              except OSError:
+                  return ""
+          summary = read("/tmp/summary.txt")
+          # Keyed by language, not storefront: the site serves /es/, not
+          # /es-ES/ and /es-MX/, and both storefronts carry the same words.
+          translations = {code: read(f"/tmp/summary.{code}.txt")
+                          for code in ("es", "pt", "ru", "fr", "de", "it", "nl")}
+          translations = {k: v for k, v in translations.items() if v}
           if not notes and not summary:
               print("Nothing to publish for this range.")
               sys.exit(0)
@@ -100,11 +121,17 @@ jobs:
           # ready to render it.
           if summary:
               entry["summary"] = summary
+          # Additive and optional, exactly like `summary` above: an app with no
+          # translated listing writes the same shape it always did, so this
+          # cannot disturb the other apps that share this workflow.
+          for code, text in translations.items():
+              entry[f"summary_{code}"] = text
           releases.insert(0, entry)
           releases.sort(key=lambda r: [int(x) for x in r["version"].split(".")], reverse=True)
           os.makedirs(os.path.dirname(path), exist_ok=True)
           json.dump(releases, open(path, "w"), indent=1)
-          print(f"Wrote {version}: {len(notes)} notes, summary={bool(summary)}.")
+          print(f"Wrote {version}: {len(notes)} notes, summary={bool(summary)}, "
+                f"translations={sorted(translations) or 'none'}.")
           PY
 
           cd "$SITE"

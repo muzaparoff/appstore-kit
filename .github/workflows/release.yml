@@ -273,15 +273,34 @@ jobs:
             --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
             --environment development --output-file ckschema-dev.ckdb
 
-          if xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+          # Reading production IS allowed — only writing it is not. So compare
+          # the two before saying anything: an app that keeps its model inside
+          # one encoded payload field changes its Swift types constantly and
+          # its CloudKit schema almost never, and a warning on every single
+          # release teaches people to ignore the one release it matters on.
+          if xcrun cktool export-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
             --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
-            --environment production --file ckschema-dev.ckdb; then
-            echo "CloudKit schema promoted for $CONTAINER_ID"
+            --environment production --output-file ckschema-prod.ckdb 2>/dev/null; then
+            if diff -q ckschema-prod.ckdb ckschema-dev.ckdb >/dev/null 2>&1; then
+              echo "CloudKit schema for $CONTAINER_ID matches production — nothing to deploy."
+            else
+              echo "::warning::CloudKit schema for $CONTAINER_ID differs from production. Deploy it before this build reaches anybody: CloudKit Console → $CONTAINER_ID → Schema → Deploy Schema Changes."
+              echo "What differs (production → development):"
+              diff ckschema-prod.ckdb ckschema-dev.ckdb | head -60 || true
+            fi
           else
-            echo "::warning::cktool can't write to $CONTAINER_ID's production schema via the API. Promote manually: CloudKit Console → $CONTAINER_ID → Schema → Deploy Schema Changes."
+            # Production is unreadable too. Fall back to attempting the write,
+            # in case Apple ever adds API support, and warn either way.
+            if xcrun cktool import-schema --token "$CLOUDKIT_MANAGEMENT_TOKEN" \
+              --team-id "$TEAM_ID" --container-id "$CONTAINER_ID" \
+              --environment production --file ckschema-dev.ckdb; then
+              echo "CloudKit schema promoted for $CONTAINER_ID"
+            else
+              echo "::warning::Could not read or write $CONTAINER_ID's production schema. Check it by hand: CloudKit Console → $CONTAINER_ID → Schema → Deploy Schema Changes."
+            fi
           fi
 
-          rm -f ckschema-dev.ckdb
+          rm -f ckschema-dev.ckdb ckschema-prod.ckdb
 
       - name: Upload to TestFlight
         # Skipped on a dry run. Everything before this — certificate import, profile

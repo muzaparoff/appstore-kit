@@ -126,8 +126,13 @@ def main():
     editable = [v for v in versions
                 if v["attributes"]["appStoreState"] in
                 ("PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED")]
+    locked_shots = False
     if editable:
         vid = editable[0]["id"]
+        # Added to a review submission that was never sent: Apple refuses to
+        # delete its screenshots, and the ones already uploaded are the ones
+        # this run would upload again.
+        locked_shots = editable[0]["attributes"]["appStoreState"] == "READY_FOR_REVIEW"
     else:
         # An app whose previous version shipped has no editable version yet —
         # create the next one.
@@ -246,6 +251,10 @@ def main():
 
     # 6. Screenshots: replace the 6.9" set — skipped when no dir is provided
     #    (keeps the previously uploaded set).
+    if locked_shots:
+        print("6/6 screenshots kept (version already in a review submission)")
+        print("\nStaging complete.")
+        return
     if not os.environ.get("SHOTS_DIR") or not SHOTS.is_dir():
         print("6/6 screenshots skipped (no SHOTS_DIR)")
         print("\nStaging complete.")

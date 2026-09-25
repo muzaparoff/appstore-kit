@@ -15,6 +15,7 @@ KEY_PATH = os.environ["ASC_KEY_PATH"]
 ISSUER = os.environ["ASC_ISSUER_ID"]
 KEY_ID = os.environ["ASC_KEY_ID"]
 BASE = "https://api.appstoreconnect.apple.com/v1"
+META_DIR = pathlib.Path(os.environ.get("META_DIR", "fastlane/metadata"))
 
 
 def token():
@@ -34,6 +35,83 @@ def req(method, path, body=None):
             return json.loads(data) if data else {}
     except urllib.error.HTTPError as e:
         raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{e.read().decode()[:600]}")
+
+
+def req_or_none(method, path):
+    """Like req, but a missing related resource is None rather than an exit."""
+    r = urllib.request.Request(BASE + path, method=method,
+                               headers={"Authorization": f"Bearer {token()}"})
+    try:
+        with urllib.request.urlopen(r) as resp:
+            data = resp.read()
+            return (json.loads(data) if data else {}).get("data")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{e.read().decode()[:600]}")
+
+
+def set_review_notes(vid):
+    """App Review notes from META_DIR/review_information/notes.txt, if present.
+
+    Apps without the file keep whatever notes App Store Connect already has.
+    """
+    path = META_DIR / "review_information" / "notes.txt"
+    if not path.exists():
+        return
+    notes = path.read_text().strip()
+    detail = req_or_none("GET", f"/appStoreVersions/{vid}/appStoreReviewDetail")
+    if detail:
+        req("PATCH", f"/appStoreReviewDetails/{detail['id']}", {"data": {
+            "type": "appStoreReviewDetails", "id": detail["id"],
+            "attributes": {"notes": notes}}})
+    else:
+        req("POST", "/appStoreReviewDetails", {"data": {
+            "type": "appStoreReviewDetails", "attributes": {"notes": notes},
+            "relationships": {"appStoreVersion": {"data": {
+                "type": "appStoreVersions", "id": vid}}}}})
+    print("review notes set")
+
+
+def ready_products():
+    """Subscriptions and in-app purchases waiting to go to review with a version.
+
+    Apple requires an app's first subscription to be reviewed together with an
+    app version; submitting the version alone leaves the product unsellable.
+    Only products in READY_TO_SUBMIT are touched, so an app with none behaves
+    exactly as before.
+    """
+    subs = []
+    for group in req("GET", f"/apps/{APP_ID}/subscriptionGroups?limit=50").get("data", []):
+        for sub in req("GET", f"/subscriptionGroups/{group['id']}/subscriptions?limit=50").get("data", []):
+            if sub["attributes"].get("state") == "READY_TO_SUBMIT":
+                subs.append(sub)
+    iaps = [i for i in req("GET", f"/apps/{APP_ID}/inAppPurchasesV2?limit=200").get("data", [])
+            if i["attributes"].get("state") == "READY_TO_SUBMIT"]
+    return subs, iaps
+
+
+def submit_products(subs, iaps):
+    for sub in subs:
+        req("POST", "/subscriptionSubmissions", {"data": {
+            "type": "subscriptionSubmissions",
+            "relationships": {"subscription": {"data": {"type": "subscriptions", "id": sub["id"]}}}}})
+        print(f"submitted subscription {sub['attributes'].get('productId')}")
+    for iap in iaps:
+        req("POST", "/inAppPurchaseSubmissions", {"data": {
+            "type": "inAppPurchaseSubmissions",
+            "relationships": {"inAppPurchaseV2": {"data": {"type": "inAppPurchases", "id": iap["id"]}}}}})
+        print(f"submitted in-app purchase {iap['attributes'].get('productId')}")
+
+
+def report_products(subs, iaps):
+    """What Apple now says about each product submitted with this version."""
+    for sub in subs:
+        state = req("GET", f"/subscriptions/{sub['id']}")["data"]["attributes"].get("state")
+        print(f"   subscription {sub['attributes'].get('productId')}: {state}")
+    for iap in iaps:
+        state = req("GET", f"/inAppPurchasesV2/{iap['id']}")["data"]["attributes"].get("state")
+        print(f"   in-app purchase {iap['attributes'].get('productId')}: {state}")
 
 
 def screenshot_states(vid):
@@ -100,6 +178,10 @@ def main():
     vid, vstr = editable["id"], editable["attributes"]["versionString"]
 
     await_screenshots(vid)
+    set_review_notes(vid)
+    subs, iaps = ready_products()
+    print(f"products to submit with {vstr}: " +
+          (", ".join(p["attributes"].get("productId", "?") for p in subs + iaps) or "none"))
 
     # Reuse an open submission if one exists, else create.
     subs = req("GET", f"/reviewSubmissions?filter[app]={APP_ID}&filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES")
@@ -123,10 +205,17 @@ def main():
                 "appStoreVersion": {"data": {"type": "appStoreVersions", "id": vid}}}}})
         print(f"added version {vstr} to the submission")
 
+    # Products before the version is sent: if Apple refuses one, this exits
+    # with the version still unsubmitted rather than shipping a paywall
+    # with nothing behind it.
+    submit_products(subs, iaps)
+
     req("PATCH", f"/reviewSubmissions/{sub['id']}", {"data": {
         "type": "reviewSubmissions", "id": sub["id"],
         "attributes": {"submitted": True}}})
     print(f"SUBMITTED {vstr} for App Review. Typical decision time: 24-48h.")
+    if subs or iaps:
+        report_products(subs, iaps)
 
 
 if __name__ == "__main__":

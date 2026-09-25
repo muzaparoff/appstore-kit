@@ -81,11 +81,20 @@ def ready_products():
     Only products in READY_TO_SUBMIT are touched, so an app with none behaves
     exactly as before.
     """
-    subs = []
+    subs, stuck = [], []
     for group in req("GET", f"/apps/{APP_ID}/subscriptionGroups?limit=50").get("data", []):
-        for sub in req("GET", f"/subscriptionGroups/{group['id']}/subscriptions?limit=50").get("data", []):
-            if sub["attributes"].get("state") == "READY_TO_SUBMIT":
-                subs.append(sub)
+        for item in req("GET", f"/subscriptionGroups/{group['id']}/subscriptions?limit=50").get("data", []):
+            state = item["attributes"].get("state")
+            print(f"   subscription {item['attributes'].get('productId')}: {state}")
+            if state == "READY_TO_SUBMIT":
+                subs.append(item)
+            elif state not in ("APPROVED", "WAITING_FOR_REVIEW", "IN_REVIEW", "REMOVED_FROM_SALE"):
+                stuck.append(f"{item['attributes'].get('productId')} ({state})")
+    # A subscription that is neither sellable nor going to review with this
+    # version would ship a paywall with nothing behind it: stop instead.
+    if stuck:
+        raise SystemExit("Not submitting: these subscriptions are not ready for review — "
+                         + ", ".join(stuck) + ". Finish them in App Store Connect first.")
     # Apple answers this with HTTP 500 for some apps that have no in-app
     # purchases at all (seen on Camipack, which only sells subscriptions), so
     # a failure here means "none found" rather than stopping the submission.
@@ -186,9 +195,10 @@ def main():
 
     await_screenshots(vid)
     set_review_notes(vid)
-    subs, iaps = ready_products()
+    ready_subs, ready_iaps = ready_products()
     print(f"products to submit with {vstr}: " +
-          (", ".join(p["attributes"].get("productId", "?") for p in subs + iaps) or "none"))
+          (", ".join(p["attributes"].get("productId", "?")
+                     for p in ready_subs + ready_iaps) or "none"))
 
     # Reuse an open submission if one exists, else create.
     subs = req("GET", f"/reviewSubmissions?filter[app]={APP_ID}&filter[state]=READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES")
@@ -215,14 +225,14 @@ def main():
     # Products before the version is sent: if Apple refuses one, this exits
     # with the version still unsubmitted rather than shipping a paywall
     # with nothing behind it.
-    submit_products(subs, iaps)
+    submit_products(ready_subs, ready_iaps)
 
     req("PATCH", f"/reviewSubmissions/{sub['id']}", {"data": {
         "type": "reviewSubmissions", "id": sub["id"],
         "attributes": {"submitted": True}}})
     print(f"SUBMITTED {vstr} for App Review. Typical decision time: 24-48h.")
-    if subs or iaps:
-        report_products(subs, iaps)
+    if ready_subs or ready_iaps:
+        report_products(ready_subs, ready_iaps)
 
 
 if __name__ == "__main__":

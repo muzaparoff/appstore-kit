@@ -86,8 +86,15 @@ def ready_products():
         for sub in req("GET", f"/subscriptionGroups/{group['id']}/subscriptions?limit=50").get("data", []):
             if sub["attributes"].get("state") == "READY_TO_SUBMIT":
                 subs.append(sub)
-    iaps = [i for i in req("GET", f"/apps/{APP_ID}/inAppPurchasesV2?limit=200").get("data", [])
-            if i["attributes"].get("state") == "READY_TO_SUBMIT"]
+    # Apple answers this with HTTP 500 for some apps that have no in-app
+    # purchases at all (seen on Camipack, which only sells subscriptions), so
+    # a failure here means "none found" rather than stopping the submission.
+    try:
+        listed = req("GET", f"/apps/{APP_ID}/inAppPurchasesV2?limit=200").get("data", [])
+    except SystemExit as failure:
+        print(f"warning: could not list in-app purchases, assuming none\n{failure}")
+        listed = []
+    iaps = [i for i in listed if i["attributes"].get("state") == "READY_TO_SUBMIT"]
     return subs, iaps
 
 

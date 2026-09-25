@@ -189,7 +189,7 @@ def main():
         return
     editable = next(v for v in versions
                     if v["attributes"]["appStoreState"] in
-                    ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED",
+                    ("PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "DEVELOPER_REJECTED", "REJECTED",
                      "METADATA_REJECTED"))
     vid, vstr = editable["id"], editable["attributes"]["versionString"]
 

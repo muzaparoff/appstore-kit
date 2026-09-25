@@ -125,7 +125,7 @@ def main():
     versions = req("GET", f"/apps/{APP_ID}/appStoreVersions")["data"]
     editable = [v for v in versions
                 if v["attributes"]["appStoreState"] in
-                ("PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED")]
+                ("PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED")]
     if editable:
         vid = editable[0]["id"]
     else:

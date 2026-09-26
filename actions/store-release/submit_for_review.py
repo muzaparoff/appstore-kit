@@ -24,17 +24,24 @@ def token():
         pathlib.Path(KEY_PATH).read_text(), algorithm="ES256", headers={"kid": KEY_ID})
 
 
-def req(method, path, body=None):
-    r = urllib.request.Request(
-        BASE + path, method=method,
-        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
-        data=json.dumps(body).encode() if body is not None else None)
-    try:
-        with urllib.request.urlopen(r) as resp:
-            data = resp.read()
-            return json.loads(data) if data else {}
-    except urllib.error.HTTPError as e:
-        raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{e.read().decode()[:600]}")
+def req(method, path, body=None, attempts=4):
+    """A 5xx from App Store Connect is retried with a growing pause; 4xx is not."""
+    for attempt in range(attempts):
+        r = urllib.request.Request(
+            BASE + path, method=method,
+            headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
+            data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r) as resp:
+                data = resp.read()
+                return json.loads(data) if data else {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:600]
+            if e.code >= 500 and attempt < attempts - 1:
+                print(f"   {method} {path} -> HTTP {e.code}, retrying ({attempt + 1}/{attempts - 1})")
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{detail}")
 
 
 def req_or_none(method, path):

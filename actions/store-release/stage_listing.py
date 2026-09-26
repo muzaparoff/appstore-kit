@@ -30,18 +30,26 @@ def token():
         pathlib.Path(KEY_PATH).read_text(), algorithm="ES256", headers={"kid": KEY_ID})
 
 
-def req(method, path, body=None, raw_url=None):
-    r = urllib.request.Request(
-        raw_url or BASE + path, method=method,
-        headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
-        data=json.dumps(body).encode() if body is not None else None)
-    try:
-        with urllib.request.urlopen(r) as resp:
-            data = resp.read()
-            return json.loads(data) if data else {}
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode()[:500]
-        raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{detail}")
+def req(method, path, body=None, raw_url=None, attempts=4):
+    """App Store Connect answers HTTP 500 now and then — seen three runs in a
+    row on screenshot deletes — so a 5xx is retried with a growing pause before
+    it is allowed to stop the release. 4xx is a real answer and is not retried."""
+    for attempt in range(attempts):
+        r = urllib.request.Request(
+            raw_url or BASE + path, method=method,
+            headers={"Authorization": f"Bearer {token()}", "Content-Type": "application/json"},
+            data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(r) as resp:
+                data = resp.read()
+                return json.loads(data) if data else {}
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:500]
+            if e.code >= 500 and attempt < attempts - 1:
+                print(f"   {method} {path} -> HTTP {e.code}, retrying ({attempt + 1}/{attempts - 1})")
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise SystemExit(f"{method} {path} -> HTTP {e.code}\n{detail}")
 
 
 def put_chunk(url, headers, data):

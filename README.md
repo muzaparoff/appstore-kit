@@ -30,7 +30,8 @@ exit-0-on-fatal-error, tag pushes that trigger nothing, and friends).
 - `submit_for_review.py` — files the review submission.
 - Config via env: `ASC_APP_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID`,
   `ASC_KEY_PATH` (+ `META_DIR`, `SHOTS_DIR` for staging). Copy layout:
-  fastlane `metadata/` + `screenshots/en-US/` dirs in the app repo.
+  fastlane `metadata/` + `screenshots/en-US/` dirs in the app repo
+  (`SHOTS_ROOT` = `screenshots/`: one set per locale folder).
 
 ## Consuming (caller repo)
 

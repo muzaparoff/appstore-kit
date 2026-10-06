@@ -25,6 +25,10 @@ inputs:
     description: "6.9-inch screenshots dir in the caller repo (empty = skip screenshots)"
     required: false
     default: "fastlane/screenshots/en-US"
+  shots_root:
+    description: "Parent of per-locale 6.9-inch screenshot dirs (fastlane/screenshots); set, it replaces shots_dir and each locale gets its own set"
+    required: false
+    default: ""
   primary_locale:
     description: "Locale written first, and the one that owns the screenshots"
     required: false
@@ -38,6 +42,7 @@ runs:
         ASC_APP_ID: ${{ inputs.asc_app_id }}
         META_DIR: ${{ inputs.meta_dir }}
         SHOTS_DIR: ${{ inputs.shots_dir }}
+        SHOTS_ROOT: ${{ inputs.shots_root }}
         PRIMARY_LOCALE: ${{ inputs.primary_locale }}
       run: |
         # ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_B64 come from the calling

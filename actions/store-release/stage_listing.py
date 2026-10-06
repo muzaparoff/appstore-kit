@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Config via env: ASC_APP_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH, META_DIR, SHOTS_DIR."""
+"""Config via env: ASC_APP_ID, ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH, META_DIR, SHOTS_DIR, SHOTS_ROOT."""
 """Stages the Camipack App Store listing via the App Store Connect API:
 version metadata, localization copy for every locale directory under
 META_DIR, name/subtitle/privacy URL, categories,
@@ -21,6 +21,9 @@ ISSUER = os.environ["ASC_ISSUER_ID"]
 KEY_ID = os.environ["ASC_KEY_ID"]
 META = pathlib.Path(os.environ.get("META_DIR", "fastlane/metadata"))
 SHOTS = pathlib.Path(os.environ.get("SHOTS_DIR", "fastlane/screenshots/en-US"))
+# Parent of per-locale folders (fastlane/screenshots/<locale>/). Set, it wins
+# over SHOTS_DIR and every localization with a folder gets its own set.
+SHOTS_ROOT = pathlib.Path(os.environ["SHOTS_ROOT"]) if os.environ.get("SHOTS_ROOT") else None
 BASE = "https://api.appstoreconnect.apple.com/v1"
 
 
@@ -257,22 +260,38 @@ def main():
         {"data": {"type": "builds", "id": builds[0]["id"]}})
     print(f"5/6 build {build_number} attached")
 
-    # 6. Screenshots: replace the 6.9" set — skipped when no dir is provided
-    #    (keeps the previously uploaded set).
+    # 6. Screenshots: replace the 6.9" set of each localization that has a
+    #    folder — skipped when no dir is provided (keeps the uploaded sets).
     if locked_shots:
         print("6/6 screenshots kept (version already in a review submission)")
         print("\nStaging complete.")
         return
-    if not os.environ.get("SHOTS_DIR") or not SHOTS.is_dir():
-        print("6/6 screenshots skipped (no SHOTS_DIR)")
+    if SHOTS_ROOT:
+        # One folder per locale, fastlane layout. A locale without a folder
+        # keeps whatever set it has (none = App Store shows the primary's).
+        folders = {loc: SHOTS_ROOT / loc for loc in written if (SHOTS_ROOT / loc).is_dir()}
+    elif os.environ.get("SHOTS_DIR") and SHOTS.is_dir():
+        # Without loc_id the screenshots would be posted against a null id —
+        # the primary is the only one SHOTS_DIR describes.
+        if not loc_id:
+            raise SystemExit(f"no '{PRIMARY}' localization to attach screenshots to; "
+                             f"expected metadata under {META / PRIMARY}")
+        folders = {PRIMARY: SHOTS}
+    else:
+        folders = {}
+    if not folders:
+        print("6/6 screenshots skipped (no SHOTS_DIR / SHOTS_ROOT)")
         print("\nStaging complete.")
         return
-    # Without this the screenshots would be posted against a null id, or worse
-    # against whichever localization happened to come back first — the primary
-    # is the only one SHOTS_DIR describes.
-    if not loc_id:
-        raise SystemExit(f"no '{PRIMARY}' localization to attach screenshots to; "
-                         f"expected metadata under {META / PRIMARY}")
+    for locale, folder in folders.items():
+        print(f"  {locale}:")
+        replace_shots(written[locale], folder)
+    print(f"6/6 screenshot sets uploaded and ordered ({', '.join(folders)})")
+    print("\nStaging complete. Remaining human steps: App Privacy + Age Rating questionnaires.")
+
+
+def replace_shots(loc_id, folder):
+    """Replaces the localization's 6.9" set with folder's PNGs, in name order."""
     sets = req("GET", f"/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")["data"]
     target = next((s for s in sets
                    if s["attributes"]["screenshotDisplayType"] == "APP_IPHONE_67"), None)
@@ -285,7 +304,7 @@ def main():
     existing = req("GET", f"/appScreenshotSets/{target['id']}/appScreenshots")["data"]
     for shot in existing:
         req("DELETE", f"/appScreenshots/{shot['id']}")
-    pngs = sorted(SHOTS.glob("*.png"))
+    pngs = sorted(folder.glob("*.png"))
     # fastlane-frameit layout: a *_framed.png replaces its raw sibling;
     # files without a framed counterpart (e.g. a hero composite) stay.
     stems = {p.stem for p in pngs}
@@ -310,8 +329,6 @@ def main():
         print(f"   uploaded {png.name}")
     req("PATCH", f"/appScreenshotSets/{target['id']}/relationships/appScreenshots",
         {"data": [{"type": "appScreenshots", "id": i} for i in order]})
-    print("6/6 screenshot set uploaded and ordered")
-    print("\nStaging complete. Remaining human steps: App Privacy + Age Rating questionnaires.")
 
 
 if __name__ == "__main__":

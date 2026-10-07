@@ -70,3 +70,53 @@ jobs:
 - Repo setting: this kit's Actions access is set to "repositories owned by
   muzaparoff", so private-to-private reuse works.
 - Version the kit by tag; apps pin `@v1`. Breaking changes bump the tag.
+
+## E2E (Maestro UI tests)
+
+Available from `v1.3`. Opt in by adding `e2e_flows` to your `ci.yml` caller.
+Apps that don't set it build, test, and tag exactly as before — no change needed.
+
+```yaml
+jobs:
+  ci:
+    uses: muzaparoff/appstore-kit/.github/workflows/ci.yml@v1.3
+    with:
+      project: MyApp.xcodeproj
+      scheme: MyApp
+      # --- E2E opt-in (all optional except e2e_flows) ---
+      e2e_flows: e2e/                   # folder of Maestro YAML flows
+      e2e_app_name: MyApp               # product name of the .app bundle
+      e2e_setup: scripts/e2e-setup.sh  # prints KEY=VALUE env lines to stdout
+      # e2e_simulator: "iPhone 17 Pro" # default
+      # e2e_env: |                      # static KEY=VALUE pairs for the flows
+      #   SOME_VAR=value
+      # e2e_pass_env: "VAR1 VAR2"      # secret names forwarded as maestro -e
+    secrets: inherit
+```
+
+The e2e job runs **on pushes to `main` only**, after `test` and before `tag`.
+A failed e2e blocks tagging and therefore TestFlight.
+
+### How it works
+
+`bin/e2e-run.sh` is the single source of truth — it bootstraps Java 17 and
+Maestro 2.11.0, runs your `e2e_setup` script (which may deploy a staging
+backend and print env vars), builds the app in Debug for the simulator, boots
+a fresh named simulator, runs `maestro test`, and shuts the simulator down on
+exit. The same script runs locally via `/app-verify`.
+
+### Optional E2E secrets
+
+Add these to the app repo if your setup script needs them:
+
+| Secret | Used for |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Deploying a staging Cloudflare Worker |
+| `E2E_TEST_SECRET` | Authenticating staging-only test endpoints |
+| `E2E_USER_A_PASSWORD` | Fixed UI-driver test account password |
+| `E2E_USER_B_PASSWORD` | Fixed API-driven test account password |
+
+### Requirements
+
+- Self-hosted macOS runner (Xcode 26+, Homebrew). Java 17 and Maestro are
+  installed automatically on first run.

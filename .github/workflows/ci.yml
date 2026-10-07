@@ -38,6 +38,25 @@ on:
         description: "File carrying MARKETING_VERSION (default: <project>/project.pbxproj; xcodegen repos: project.yml)"
         type: string
         default: ""
+      e2e_flows:
+        description: "Maestro flows folder; empty = no e2e stage (default)"
+        type: string
+        default: ""
+      e2e_setup:
+        type: string
+        default: ""
+      e2e_app_name:
+        type: string
+        default: ""
+      e2e_simulator:
+        type: string
+        default: "iPhone 17 Pro"
+      e2e_env:
+        type: string
+        default: ""
+      e2e_pass_env:
+        type: string
+        default: ""
 
 jobs:
   test:
@@ -140,14 +159,40 @@ jobs:
             build.log
 
   # ---------------------------------------------------------------------------
+  # Optional E2E stage: runs Maestro flows on a fresh iOS simulator. Only
+  # active when e2e_flows is non-empty and the push is to main. Apps that
+  # don't set e2e_flows skip this job entirely and tag as before.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E
+    needs: test
+    if: inputs.e2e_flows != '' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    uses: muzaparoff/appstore-kit/.github/workflows/e2e.yml@v1.3
+    with:
+      project: ${{ inputs.project }}
+      scheme: ${{ inputs.scheme }}
+      app_name: ${{ inputs.e2e_app_name }}
+      pre_build: ${{ inputs.pre_build }}
+      flows: ${{ inputs.e2e_flows }}
+      setup: ${{ inputs.e2e_setup }}
+      simulator: ${{ inputs.e2e_simulator }}
+      env: ${{ inputs.e2e_env }}
+      pass_env: ${{ inputs.e2e_pass_env }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
   # Auto-tag: derive the next semantic version from conventional commits and push
   # the tag, which is what triggers the release workflow. Runs only after tests
   # pass, so a tag always points at a green commit.
   # ---------------------------------------------------------------------------
   tag:
     name: Tag next version
-    needs: test
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test, e2e]
+    # always(): a skipped e2e (app not opted in) must not skip tagging.
+    if: >-
+      always() && needs.test.result == 'success' &&
+      (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') &&
+      github.ref == 'refs/heads/main' && github.event_name == 'push'
     # Hosted Linux is behind the same billing wall as hosted macOS; this job is just
     # git + gh and runs fine on the Mac runner.
     runs-on: [self-hosted, macos]

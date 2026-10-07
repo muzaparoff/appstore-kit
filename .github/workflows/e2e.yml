@@ -1,0 +1,116 @@
+name: 🎬 E2E (kit)
+
+# Drives the app's real UI with Maestro on a fresh simulator. Everything that
+# matters lives in bin/e2e-run.sh so /app-verify runs the identical steps locally.
+on:
+  workflow_call:
+    inputs:
+      project:
+        type: string
+        required: true
+      scheme:
+        type: string
+        required: true
+      app_name:
+        description: "Product name of the .app (e.g. Tabby)"
+        type: string
+        required: true
+      pre_build:
+        type: string
+        default: ""
+      flows:
+        type: string
+        default: "e2e/"
+      setup:
+        description: "App script: prepares the backend, prints KEY=VALUE lines"
+        type: string
+        default: ""
+      simulator:
+        type: string
+        default: "iPhone 17 Pro"
+      maestro_version:
+        type: string
+        default: "2.11.0"
+      env:
+        description: "Newline-separated KEY=VALUE pairs exported before setup"
+        type: string
+        default: ""
+      pass_env:
+        description: "Space-separated variable names forwarded to maestro as -e"
+        type: string
+        default: ""
+      kit_ref:
+        description: "appstore-kit ref providing bin/e2e-run.sh"
+        type: string
+        default: "v1.3"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      E2E_TEST_SECRET:
+        required: false
+      E2E_USER_A_PASSWORD:
+        required: false
+      E2E_USER_B_PASSWORD:
+        required: false
+
+jobs:
+  e2e:
+    name: E2E (Maestro)
+    runs-on: [self-hosted, macos]
+    timeout-minutes: 40
+    concurrency:
+      group: e2e-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: muzaparoff/appstore-kit
+          ref: ${{ inputs.kit_ref }}
+          path: .kit
+
+      - name: Pre-build
+        if: ${{ inputs.pre_build != '' }}
+        run: ${{ inputs.pre_build }}
+
+      - name: Select Xcode 26
+        run: |
+          for XC in $(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -rV) /Applications/Xcode.app; do
+            if [ -d "$XC" ]; then echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"; break; fi
+          done
+
+      - name: Run flows
+        env:
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+          APP_NAME: ${{ inputs.app_name }}
+          FLOWS: ${{ inputs.flows }}
+          SETUP: ${{ inputs.setup }}
+          SIMULATOR: ${{ inputs.simulator }}
+          MAESTRO_VERSION: ${{ inputs.maestro_version }}
+          PASS_ENV: ${{ inputs.pass_env }}
+          E2E_ENV: ${{ inputs.env }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          E2E_TEST_SECRET: ${{ secrets.E2E_TEST_SECRET }}
+          E2E_USER_A_PASSWORD: ${{ secrets.E2E_USER_A_PASSWORD }}
+          E2E_USER_B_PASSWORD: ${{ secrets.E2E_USER_B_PASSWORD }}
+        run: |
+          while IFS= read -r kv; do
+            if [ -n "$kv" ]; then export "${kv?}"; fi
+          done <<< "$E2E_ENV"
+          bash .kit/bin/e2e-run.sh
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-${{ github.run_number }}
+          path: |
+            build/e2e/report.xml
+            build/e2e/artifacts
+            build/e2e/build.log
+          if-no-files-found: ignore
+
+      - name: Clean workspace
+        if: always()
+        run: rm -rf build/e2e .kit || true

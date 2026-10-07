@@ -107,14 +107,33 @@ exit. The same script runs locally via `/app-verify`.
 
 ### Optional E2E secrets
 
-Add these to the app repo if your setup script needs them:
+All four secrets are optional. Add whichever your setup script needs:
 
 | Secret | Used for |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | Deploying a staging Cloudflare Worker |
+| `CLOUDFLARE_API_TOKEN` | Deploying a staging Cloudflare Worker (see below) |
 | `E2E_TEST_SECRET` | Authenticating staging-only test endpoints |
 | `E2E_USER_A_PASSWORD` | Fixed UI-driver test account password |
 | `E2E_USER_B_PASSWORD` | Fixed API-driven test account password |
+
+#### Cloudflare / wrangler in setup scripts
+
+`CLOUDFLARE_API_TOKEN` is optional because the self-hosted runner runs as the
+macOS user who has a persistent `wrangler login` session. Either works:
+
+- **Token set:** wrangler picks it up from the environment automatically.
+- **Token not set:** the setup script must verify the OAuth session before
+  calling wrangler; fail loudly if it is missing:
+
+```bash
+# At the top of your e2e-setup.sh, before any wrangler call:
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  if ! npx wrangler whoami >/dev/null 2>&1; then
+    echo "::error::wrangler is not logged in on the runner — run \`npx wrangler login\` on the Mac mini (or set CLOUDFLARE_API_TOKEN)"
+    exit 1
+  fi
+fi
+```
 
 ### Requirements
 

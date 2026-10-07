@@ -111,7 +111,7 @@ All four secrets are optional. Add whichever your setup script needs:
 
 | Secret | Used for |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | Deploying a staging Cloudflare Worker (see below) |
+| `CLOUDFLARE_API_TOKEN` | Deploying a staging Cloudflare Worker; optional — self-hosted runners can use the runner user's `wrangler login` instead |
 | `E2E_TEST_SECRET` | Authenticating staging-only test endpoints |
 | `E2E_USER_A_PASSWORD` | Fixed UI-driver test account password |
 | `E2E_USER_B_PASSWORD` | Fixed API-driven test account password |
@@ -119,21 +119,18 @@ All four secrets are optional. Add whichever your setup script needs:
 #### Cloudflare / wrangler in setup scripts
 
 `CLOUDFLARE_API_TOKEN` is optional because the self-hosted runner runs as the
-macOS user who has a persistent `wrangler login` session. Either works:
+macOS user who has a persistent `wrangler login` session.
 
-- **Token set:** wrangler picks it up from the environment automatically.
-- **Token not set:** the setup script must verify the OAuth session before
-  calling wrangler; fail loudly if it is missing:
+The kit handles both cases automatically in the "Run flows" step:
 
-```bash
-# At the top of your e2e-setup.sh, before any wrangler call:
-if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-  if ! npx wrangler whoami >/dev/null 2>&1; then
-    echo "::error::wrangler is not logged in on the runner — run \`npx wrangler login\` on the Mac mini (or set CLOUDFLARE_API_TOKEN)"
-    exit 1
-  fi
-fi
-```
+- **Token set:** the env var is present; wrangler picks it up automatically.
+- **Token not set:** the kit unsets the env var (an empty string would make
+  wrangler attempt token auth and fail) and, when a setup script is
+  configured, runs `npx --yes wrangler whoami` before the script starts. If
+  the OAuth session is missing the step fails with:
+  `wrangler is not logged in on the runner — run npx wrangler login on the Mac mini, or set CLOUDFLARE_API_TOKEN`
+
+Setup scripts do not need their own guard.
 
 ### Requirements
 

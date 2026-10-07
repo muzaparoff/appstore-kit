@@ -96,6 +96,21 @@ jobs:
           E2E_USER_A_PASSWORD: ${{ secrets.E2E_USER_A_PASSWORD }}
           E2E_USER_B_PASSWORD: ${{ secrets.E2E_USER_B_PASSWORD }}
         run: |
+          # An empty-string CLOUDFLARE_API_TOKEN makes wrangler attempt token
+          # auth and fail. Unset it so wrangler falls back to the runner's
+          # OAuth login when the secret is not configured.
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then unset CLOUDFLARE_API_TOKEN; fi
+
+          # When a setup script is configured and no token is present, verify
+          # the wrangler OAuth session now so the failure is clear, not buried
+          # inside the setup script.
+          if [ -n "$SETUP" ] && [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            if ! npx --yes wrangler whoami >/dev/null 2>&1; then
+              echo "::error::wrangler is not logged in on the runner — run npx wrangler login on the Mac mini, or set CLOUDFLARE_API_TOKEN"
+              exit 1
+            fi
+          fi
+
           while IFS= read -r kv; do
             if [ -n "$kv" ]; then export "${kv?}"; fi
           done <<< "$E2E_ENV"

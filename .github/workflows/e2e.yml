@@ -109,10 +109,9 @@ jobs:
         if: failure()
         with:
           name: e2e-${{ github.run_number }}
-          path: |
-            build/e2e/report.xml
-            build/e2e/artifacts
-            build/e2e/build.log
+          # bin/e2e-run.sh builds this sanitized dir: report.xml + screenshots only.
+          # commands*.json and maestro.log (which contain env values) are never copied.
+          path: build/e2e/upload/
           if-no-files-found: ignore
 
       - name: Clean workspace

@@ -49,6 +49,7 @@ APP="$OUT_DIR/dd/Build/Products/Debug-iphonesimulator/$APP_NAME.app"
 [ -d "$APP" ] || { log "no app at $APP"; exit 1; }
 
 UDID="$(xcrun simctl create "e2e-${GITHUB_RUN_ID:-local}-$$" "$SIMULATOR")"
+# shellcheck disable=SC2329  # called via trap, not directly
 cleanup() {
   xcrun simctl shutdown "$UDID" >/dev/null 2>&1 || true
   xcrun simctl delete "$UDID" >/dev/null 2>&1 || true
@@ -62,5 +63,38 @@ ARGS=()
 for name in $PASS_ENV; do ARGS+=(-e "$name=${!name:-}"); done
 
 log "maestro test $FLOWS on $SIMULATOR ($UDID)"
+# Capture maestro's exit so we can sanitize artifacts before exiting.
+MAESTRO_EXIT=0
 maestro --device "$UDID" test ${ARGS[@]+"${ARGS[@]}"} \
-  --format junit --output "$OUT_DIR/report.xml" --test-output-dir "$OUT_DIR/artifacts" "$FLOWS"
+  --format junit --output "$OUT_DIR/report.xml" --test-output-dir "$OUT_DIR/artifacts" "$FLOWS" \
+  || MAESTRO_EXIT=$?
+
+# --- Sanitize artifacts: never upload commands*.json or *.log, which contain
+# env values (Maestro records every -e value in commands.json and maestro.log).
+# Build a clean upload dir with only the JUnit report and screenshots.
+# iOS simulator AutoFill ("Save Password?") suppression via simctl/defaults is
+# not reliably supported across iOS simulator runtimes; skip for now.
+UPLOAD_DIR="$OUT_DIR/upload"
+mkdir -p "$UPLOAD_DIR"
+[ -f "$OUT_DIR/report.xml" ] && cp "$OUT_DIR/report.xml" "$UPLOAD_DIR/"
+while IFS= read -r f; do
+  cp "$f" "$UPLOAD_DIR/$(basename "$f")"
+done < <(find "$OUT_DIR/artifacts" -maxdepth 3 -name '*.png' 2>/dev/null)
+
+# Safety scan: reject the upload if any PASS_ENV secret value appears in it.
+# Logs variable names only, never values.
+SCAN_FAIL=0
+for name in $PASS_ENV; do
+  v="${!name:-}"
+  [ -n "$v" ] || continue
+  if grep -rlF -- "$v" "$UPLOAD_DIR" >/dev/null 2>&1; then
+    log "::error::secret-scan: value of $name found in upload artifacts — suppressing upload"
+    SCAN_FAIL=1
+  fi
+done
+if [ "$SCAN_FAIL" -ne 0 ]; then
+  rm -rf "$UPLOAD_DIR"
+  exit 1
+fi
+
+exit "$MAESTRO_EXIT"

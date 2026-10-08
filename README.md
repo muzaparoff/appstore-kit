@@ -119,18 +119,25 @@ All four secrets are optional. Add whichever your setup script needs:
 #### Cloudflare / wrangler in setup scripts
 
 `CLOUDFLARE_API_TOKEN` is optional because the self-hosted runner runs as the
-macOS user who has a persistent `wrangler login` session.
+macOS user who has a persistent `wrangler login` session. Either works:
 
-The kit handles both cases automatically in the "Run flows" step:
+- **Token set:** wrangler picks it up from the environment automatically.
+- **Token not set (or absent):** when GitHub has no secret configured it
+  injects an empty string; the kit unsets the variable so wrangler sees
+  nothing and falls back to the OAuth login cleanly.
 
-- **Token set:** the env var is present; wrangler picks it up automatically.
-- **Token not set:** the kit unsets the env var (an empty string would make
-  wrangler attempt token auth and fail) and, when a setup script is
-  configured, runs `npx --yes wrangler whoami` before the script starts. If
-  the OAuth session is missing the step fails with:
-  `wrangler is not logged in on the runner — run npx wrangler login on the Mac mini, or set CLOUDFLARE_API_TOKEN`
+Setup scripts that call wrangler should verify the session themselves,
+because `wrangler whoami` exits 0 even when not logged in — check its
+output instead. Run this from the folder where your wrangler project lives
+(so `npx` picks up the pinned version from `node_modules`):
 
-Setup scripts do not need their own guard.
+```bash
+# In your e2e-setup.sh, before any wrangler call:
+npx wrangler whoami 2>&1 | grep -q "You are logged in" || {
+  echo "run wrangler login on the runner (or set CLOUDFLARE_API_TOKEN)"
+  exit 1
+}
+```
 
 ### Requirements
 

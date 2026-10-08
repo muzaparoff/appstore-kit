@@ -188,9 +188,9 @@ jobs:
   tag:
     name: Tag next version
     needs: [test, e2e]
-    # always(): a skipped e2e (app not opted in) must not skip tagging.
+    # !cancelled(): lets a skipped e2e through while blocking a cancelled run.
     if: >-
-      always() && needs.test.result == 'success' &&
+      !cancelled() && needs.test.result == 'success' &&
       (needs.e2e.result == 'success' || needs.e2e.result == 'skipped') &&
       github.ref == 'refs/heads/main' && github.event_name == 'push'
     # Hosted Linux is behind the same billing wall as hosted macOS; this job is just

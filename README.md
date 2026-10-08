@@ -79,7 +79,7 @@ Apps that don't set it build, test, and tag exactly as before — no change need
 ```yaml
 jobs:
   ci:
-    uses: muzaparoff/appstore-kit/.github/workflows/ci.yml@v1.3
+    uses: muzaparoff/appstore-kit/.github/workflows/ci.yml@v1.4  # @v1.3 works without e2e_after
     with:
       project: MyApp.xcodeproj
       scheme: MyApp
@@ -106,10 +106,17 @@ backend and print env vars), builds the app in Debug for the simulator, boots
 a fresh named simulator, runs `maestro test`, and shuts the simulator down on
 exit. The same script runs locally via `/app-verify`.
 
-From `v1.4`, an optional `e2e_after` script runs once all flows have passed,
-with the setup env still exported (e.g. another client, like a web app, checks
-what the app wrote). A non-zero exit fails the job. Empty (the default) keeps
-the `v1.3` behaviour. Locally, pass it as `AFTER=scripts/e2e-after.sh`.
+From `v1.4`, an optional `e2e_after` script runs once all flows have passed
+(e.g. another client, like a web app, checks what the app wrote). A non-zero
+exit fails the job. Empty (the default) keeps the `v1.3` behaviour. `v1` stays
+on `v1.3`, so pin `@v1.4` to use it. Locally, pass it as
+`AFTER=scripts/e2e-after.sh`.
+
+Like the setup script, the after-hook runs with the job's full environment:
+the setup's KEY=VALUE lines, `e2e_env`, and every kit secret
+(`CLOUDFLARE_API_TOKEN`, `E2E_TEST_SECRET`, `E2E_USER_*_PASSWORD`), not only
+`pass_env`. Treat it as trusted app code and don't echo those values; the
+artifact secret scan only checks `pass_env` values.
 
 ### Optional E2E secrets
 

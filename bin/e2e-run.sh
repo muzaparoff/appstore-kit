@@ -69,6 +69,12 @@ maestro --device "$UDID" test ${ARGS[@]+"${ARGS[@]}"} \
   --format junit --output "$OUT_DIR/report.xml" --test-output-dir "$OUT_DIR/artifacts" "$FLOWS" \
   || MAESTRO_EXIT=$?
 
+# App-specific checks after the flows (e.g. another client reads what the app wrote). Only when the flows passed.
+if [ "$MAESTRO_EXIT" -eq 0 ] && [ -n "${AFTER:-}" ]; then
+  log "after: $AFTER"
+  bash "$AFTER" || MAESTRO_EXIT=$?
+fi
+
 # --- Sanitize artifacts: never upload commands*.json or *.log, which contain
 # env values (Maestro records every -e value in commands.json and maestro.log).
 # Build a clean upload dir with only the JUnit report and screenshots.

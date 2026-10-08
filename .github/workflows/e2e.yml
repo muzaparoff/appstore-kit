@@ -25,6 +25,10 @@ on:
         description: "App script: prepares the backend, prints KEY=VALUE lines"
         type: string
         default: ""
+      after:
+        description: "App script run after the flows pass (e.g. another client checks what the app wrote); non-zero fails the job"
+        type: string
+        default: ""
       simulator:
         type: string
         default: "iPhone 17 Pro"
@@ -42,7 +46,7 @@ on:
       kit_ref:
         description: "appstore-kit ref providing bin/e2e-run.sh"
         type: string
-        default: "v1.3"
+        default: "v1.4"
     secrets:
       CLOUDFLARE_API_TOKEN:
         required: false
@@ -87,6 +91,7 @@ jobs:
           APP_NAME: ${{ inputs.app_name }}
           FLOWS: ${{ inputs.flows }}
           SETUP: ${{ inputs.setup }}
+          AFTER: ${{ inputs.after }}
           SIMULATOR: ${{ inputs.simulator }}
           MAESTRO_VERSION: ${{ inputs.maestro_version }}
           PASS_ENV: ${{ inputs.pass_env }}

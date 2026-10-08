@@ -87,6 +87,7 @@ jobs:
       e2e_flows: e2e/                   # folder of Maestro YAML flows
       e2e_app_name: MyApp               # product name of the .app bundle
       e2e_setup: scripts/e2e-setup.sh  # prints KEY=VALUE env lines to stdout
+      # e2e_after: scripts/e2e-after.sh # v1.4+: runs after the flows pass; non-zero fails the job
       # e2e_simulator: "iPhone 17 Pro" # default
       # e2e_env: |                      # static KEY=VALUE pairs for the flows
       #   SOME_VAR=value
@@ -104,6 +105,11 @@ Maestro 2.11.0, runs your `e2e_setup` script (which may deploy a staging
 backend and print env vars), builds the app in Debug for the simulator, boots
 a fresh named simulator, runs `maestro test`, and shuts the simulator down on
 exit. The same script runs locally via `/app-verify`.
+
+From `v1.4`, an optional `e2e_after` script runs once all flows have passed,
+with the setup env still exported (e.g. another client, like a web app, checks
+what the app wrote). A non-zero exit fails the job. Empty (the default) keeps
+the `v1.3` behaviour. Locally, pass it as `AFTER=scripts/e2e-after.sh`.
 
 ### Optional E2E secrets
 

@@ -45,6 +45,9 @@ on:
       e2e_setup:
         type: string
         default: ""
+      e2e_after:
+        type: string
+        default: ""
       e2e_app_name:
         type: string
         default: ""
@@ -167,7 +170,7 @@ jobs:
     name: E2E
     needs: test
     if: inputs.e2e_flows != '' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    uses: muzaparoff/appstore-kit/.github/workflows/e2e.yml@v1.3
+    uses: muzaparoff/appstore-kit/.github/workflows/e2e.yml@v1.4
     with:
       project: ${{ inputs.project }}
       scheme: ${{ inputs.scheme }}
@@ -175,6 +178,7 @@ jobs:
       pre_build: ${{ inputs.pre_build }}
       flows: ${{ inputs.e2e_flows }}
       setup: ${{ inputs.e2e_setup }}
+      after: ${{ inputs.e2e_after }}
       simulator: ${{ inputs.e2e_simulator }}
       env: ${{ inputs.e2e_env }}
       pass_env: ${{ inputs.e2e_pass_env }}

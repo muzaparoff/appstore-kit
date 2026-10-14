@@ -290,26 +290,68 @@ def main():
     print("\nStaging complete. Remaining human steps: App Privacy + Age Rating questionnaires.")
 
 
+# App Store screenshot sets by pixel size (portrait and landscape). Files
+# are routed by their real dimensions, not their names: a folder holding
+# Watch shots next to iPhone shots used to push the Watch PNGs into the
+# iPhone set, where Apple rejected them and they used up the 10-shot limit.
+DISPLAY_TYPES = {
+    (1320, 2868): "APP_IPHONE_67", (1290, 2796): "APP_IPHONE_67",
+    (1284, 2778): "APP_IPHONE_67", (1242, 2688): "APP_IPHONE_65",
+    (2064, 2752): "APP_IPAD_PRO_3GEN_129", (2048, 2732): "APP_IPAD_PRO_3GEN_129",
+    (422, 514): "APP_WATCH_ULTRA", (410, 502): "APP_WATCH_ULTRA",
+    (416, 496): "APP_WATCH_SERIES_10", (374, 446): "APP_WATCH_SERIES_10",
+    (396, 484): "APP_WATCH_SERIES_7", (352, 430): "APP_WATCH_SERIES_7",
+}
+MAX_PER_SET = 10
+
+
+def png_size(blob):
+    """Width and height from a PNG's IHDR chunk."""
+    return int.from_bytes(blob[16:20], "big"), int.from_bytes(blob[20:24], "big")
+
+
+def display_type(blob):
+    w, h = png_size(blob)
+    return DISPLAY_TYPES.get((w, h)) or DISPLAY_TYPES.get((h, w))
+
+
 def replace_shots(loc_id, folder):
-    """Replaces the localization's 6.9" set with folder's PNGs, in name order."""
-    sets = req("GET", f"/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")["data"]
-    target = next((s for s in sets
-                   if s["attributes"]["screenshotDisplayType"] == "APP_IPHONE_67"), None)
-    if target is None:
-        target = req("POST", "/appScreenshotSets", {"data": {
-            "type": "appScreenshotSets",
-            "attributes": {"screenshotDisplayType": "APP_IPHONE_67"},
-            "relationships": {"appStoreVersionLocalization":
-                              {"data": {"type": "appStoreVersionLocalizations", "id": loc_id}}}}})["data"]
-    existing = req("GET", f"/appScreenshotSets/{target['id']}/appScreenshots")["data"]
-    for shot in existing:
-        req("DELETE", f"/appScreenshots/{shot['id']}")
+    """Replaces each screenshot set that folder has PNGs for, in name order."""
     pngs = sorted(folder.glob("*.png"))
     # fastlane-frameit layout: a *_framed.png replaces its raw sibling;
     # files without a framed counterpart (e.g. a hero composite) stay.
     stems = {p.stem for p in pngs}
     pngs = [p for p in pngs
             if p.stem.endswith("_framed") or f"{p.stem}_framed" not in stems]
+    groups = {}
+    for png in pngs:
+        kind = display_type(png.read_bytes())
+        if kind is None:
+            w, h = png_size(png.read_bytes())
+            sys.exit(f"::error::{png.name} is {w}x{h}, not an App Store screenshot size")
+        groups.setdefault(kind, []).append(png)
+    for kind, files in groups.items():
+        if len(files) > MAX_PER_SET:
+            sys.exit(f"::error::{len(files)} screenshots for {kind}; the App Store allows {MAX_PER_SET}: "
+                     + ", ".join(f.name for f in files))
+
+    sets = req("GET", f"/appStoreVersionLocalizations/{loc_id}/appScreenshotSets")["data"]
+    for kind, files in groups.items():
+        replace_set(loc_id, sets, kind, files)
+
+
+def replace_set(loc_id, sets, kind, pngs):
+    target = next((s for s in sets
+                   if s["attributes"]["screenshotDisplayType"] == kind), None)
+    if target is None:
+        target = req("POST", "/appScreenshotSets", {"data": {
+            "type": "appScreenshotSets",
+            "attributes": {"screenshotDisplayType": kind},
+            "relationships": {"appStoreVersionLocalization":
+                              {"data": {"type": "appStoreVersionLocalizations", "id": loc_id}}}}})["data"]
+    existing = req("GET", f"/appScreenshotSets/{target['id']}/appScreenshots")["data"]
+    for shot in existing:
+        req("DELETE", f"/appScreenshots/{shot['id']}")
     order = []
     for png in pngs:
         blob = png.read_bytes()
@@ -326,7 +368,7 @@ def replace_shots(loc_id, folder):
             "attributes": {"uploaded": True,
                            "sourceFileChecksum": hashlib.md5(blob).hexdigest()}}})
         order.append(shot["id"])
-        print(f"   uploaded {png.name}")
+        print(f"   uploaded {png.name} ({kind})")
     req("PATCH", f"/appScreenshotSets/{target['id']}/relationships/appScreenshots",
         {"data": [{"type": "appScreenshots", "id": i} for i in order]})
 

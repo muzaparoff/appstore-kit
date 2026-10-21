@@ -135,13 +135,14 @@ class ConsoleCase(unittest.TestCase):
         opener = urllib.request.build_opener(NoRedirect)
         try:
             with opener.open(r, timeout=10) as resp:
+                resp.headers["X-Body"] = resp.read().decode()
                 return resp.status, resp.headers
         except urllib.error.HTTPError as e:
             return e.code, e.headers
 
     def test_login_sets_session_cookie(self):
         code, hdr = self.login("op", "s3cret-test", "/runs")
-        self.assertEqual((code, hdr["Location"]), (303, "/runs"))
+        self.assertEqual(code, 200)
         cookie = hdr["Set-Cookie"]
         for flag in ("HttpOnly", "Secure", "SameSite=Lax", "Max-Age=7776000"):
             self.assertIn(flag, cookie)
@@ -177,7 +178,7 @@ class ConsoleCase(unittest.TestCase):
     def test_login_rejects_bad_password_and_foreign_next(self):
         self.assertEqual(self.login("op", "wrong")[0], 401)
         for nxt in ("//evil.example/", "https://evil.example/", "/\\evil.example"):
-            self.assertEqual(self.login("op", "s3cret-test", nxt)[1]["Location"], "/", nxt)
+            self.assertIn('content="0;url=/"', self.login("op", "s3cret-test", nxt)[1]["X-Body"], nxt)
 
     def test_logout_clears_cookie(self):
         r = urllib.request.Request(self.base + "/logout", data=b"", method="POST")

@@ -213,7 +213,10 @@ class Handler(BaseHTTPRequestHandler):
         form = self.read_form()
         nxt = safe_next(form.get("next", "/"))
         if self.config.check_login(form.get("username", "").encode("utf-8"), form.get("password", "").encode("utf-8")):
-            return self.send(303, "", headers={"Location": nxt, "Set-Cookie": self.session_cookie()})
+            # 200 + meta refresh, not a 303: WebKit apps (iOS Firefox, Chrome) can drop a
+            # cookie set on a redirect, which looped them back to the form.
+            return self.send(200, pages.signed_in_page(nxt),
+                             headers={"Set-Cookie": self.session_cookie(), "Cache-Control": "no-store"})
         time.sleep(1)  # slows guessing
         self.page(401, pages.login_page(nxt, "Wrong user or password."))
 

@@ -161,6 +161,18 @@ def login_page(nxt, error=""):
 </form></body></html>""" % (h(error), h(nxt))
 
 
+def signed_in_page(nxt):
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="refresh" content="0;url=%s">
+<title>Signed in · E2E Console</title>
+<link rel="stylesheet" href="/static/console.css">
+</head><body class="signin">
+<div class="login"><div class="lg"><i></i>E2E Console</div>
+<p>Signed in. <a href="%s">Continue</a></p></div></body></html>""" % (h(nxt), h(nxt))
+
+
 def error_page(ctx, code, msg):
     return layout(ctx, "Error", '<div class="mh"><h3>%d</h3></div><p>%s</p>' % (code, h(msg)))
 

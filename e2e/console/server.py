@@ -151,20 +151,35 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- auth
 
-    def cookie(self, name):
+    def cookies(self, name):
         # HTTP/2 browsers send one cookie per header and Cloudflare forwards them
-        # that way, so read every Cookie header, not just the first.
+        # that way, so read every Cookie header, not just the first. A browser may
+        # also hold a stale copy beside the fresh one, so return every value.
+        out = []
         for part in ";".join(self.headers.get_all("Cookie") or []).split(";"):
             k, _, v = part.strip().partition("=")
             if k == name:
-                return v
-        return ""
+                out.append(v.strip().strip('"'))
+        return out
 
     def session_ok(self):
-        exp, _, sig = self.cookie(COOKIE).partition(".")
-        ok = exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, self.config.session_sig(exp))
-        self.renew = ok and int(exp) - time.time() < SESSION_S - RENEW_S
-        return ok
+        self.renew = False
+        for v in self.cookies(COOKIE):
+            exp, _, sig = v.partition(".")
+            if exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, self.config.session_sig(exp)):
+                self.renew = int(exp) - time.time() < SESSION_S - RENEW_S
+                return True
+        return False
+
+    def why_signed_out(self):
+        """One log line on a refused page view: cookie names and verdicts, never values."""
+        names = [p.strip().partition("=")[0] for p in ";".join(self.headers.get_all("Cookie") or []).split(";") if p.strip()]
+        verdicts = []
+        for v in self.cookies(COOKIE):
+            exp, _, sig = v.partition(".")
+            verdicts.append("malformed" if not exp.isdigit() else "expired" if int(exp) <= time.time() else "bad-sig")
+        return "signed out: cookie headers=%d names=%s session=%s" % (
+            len(self.headers.get_all("Cookie") or []), names, verdicts or "none")
 
     def session_cookie(self):
         exp = int(time.time()) + SESSION_S
@@ -190,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(401, {"error": "sign in first"})
         else:
             # No WWW-Authenticate, so browsers show the form instead of the Basic popup.
+            sys.stderr.write("%s %s\n" % (self.log_date_time_string(), self.why_signed_out()))
             self.page(401, pages.login_page(safe_next(self.path)))
         return False
 

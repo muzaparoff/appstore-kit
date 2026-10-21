@@ -194,7 +194,7 @@ Every request except `/login` and `/static/console.css` needs a login
 (`E2E_CONSOLE_USER` / `E2E_CONSOLE_PASS` from `~/.config/e2e/console.env`,
 mode 600, owner-written). Browsers sign in on the `/login` form and get an
 `e2e_session` cookie (HMAC-signed expiry, 90 days, HttpOnly, Secure,
-SameSite=Lax; keyed on the login, so changing the password signs everyone
+SameSite=Lax, renewed when used after a day; keyed on the login, so changing the password signs everyone
 out). Scripts may send Basic auth instead. `POST /logout` clears the cookie.
 Inputs are validated against `e2e projects --json`; nothing from a request is
 ever passed to a shell.

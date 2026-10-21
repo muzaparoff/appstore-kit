@@ -152,6 +152,19 @@ class ConsoleCase(unittest.TestCase):
         forged = "%s=%d.%s" % (name, int(exp) + 1, sig)
         self.assertEqual(self.req("/runs", auth=None, headers={"Cookie": forged})[0], 401)
 
+    def test_session_renews_on_use(self):
+        old = int(server.time.time()) + server.SESSION_S - 2 * server.RENEW_S
+        jar = "%s=%d.%s" % (server.COOKIE, old, self.cfg.session_sig(old))
+        code, _, hdr = self.req("/runs", auth=None, headers={"Cookie": jar})
+        self.assertEqual(code, 200)
+        self.assertIn("Max-Age=7776000", hdr["Set-Cookie"])
+        fresh = hdr["Set-Cookie"].split(";")[0]
+        self.assertIsNone(self.req("/runs", auth=None, headers={"Cookie": fresh})[2]["Set-Cookie"])
+
+    def test_csrf_survives_restart(self):
+        self.assertEqual(server.Config("op", "s3cret-test").csrf(), self.cfg.csrf())
+        self.assertNotEqual(server.Config("op", "other").csrf(), self.cfg.csrf())
+
     def test_login_rejects_bad_password_and_foreign_next(self):
         self.assertEqual(self.login("op", "wrong")[0], 401)
         for nxt in ("//evil.example/", "https://evil.example/", "/\\evil.example"):

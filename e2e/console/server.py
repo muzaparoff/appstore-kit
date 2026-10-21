@@ -5,7 +5,6 @@ import hmac
 import json
 import os
 import re
-import secrets
 import stat
 import sys
 import time
@@ -26,6 +25,7 @@ MARKS = ("fix", "not-a-bug", "flaky")
 MAX_BODY = 16 * 1024
 COOKIE = "e2e_session"
 SESSION_S = 90 * 86400
+RENEW_S = 86400  # a session used at least daily never expires
 SSE_MAX_S = 3 * 3600
 CSP = ("default-src 'self'; img-src 'self'; media-src 'self'; style-src 'self'; script-src 'self'; "
        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -45,14 +45,12 @@ class Config:
     def __init__(self, user, password):
         self.user = user.encode("utf-8")
         self.password = password.encode("utf-8")
-        # Per-process secret: restarting the console invalidates old CSRF tokens.
-        self.secret = secrets.token_bytes(32)
-        # Session key comes from the login, so sessions survive a restart and
-        # changing E2E_CONSOLE_PASS signs every browser out.
+        # Keys come from the login, so sessions and open tabs survive a console
+        # restart, and changing E2E_CONSOLE_PASS signs every browser out.
         self.session_key = hashlib.sha256(b"session:" + self.user + b":" + self.password).digest()
 
     def csrf(self):
-        return hmac.new(self.secret, b"csrf:" + self.user, hashlib.sha256).hexdigest()
+        return hmac.new(self.session_key, b"csrf:" + self.user, hashlib.sha256).hexdigest()
 
     def session_sig(self, exp):
         return hmac.new(self.session_key, str(exp).encode(), hashlib.sha256).hexdigest()
@@ -122,7 +120,11 @@ class Handler(BaseHTTPRequestHandler):
         self.security_headers()
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        for k, v in (headers or {}).items():
+        headers = dict(headers or {})
+        if getattr(self, "renew", False) and "Set-Cookie" not in headers:
+            headers["Set-Cookie"] = self.session_cookie()
+        self.renew = False  # the handler is reused across keep-alive requests
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -158,7 +160,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def session_ok(self):
         exp, _, sig = self.cookie(COOKIE).partition(".")
-        return exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, self.config.session_sig(exp))
+        ok = exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, self.config.session_sig(exp))
+        self.renew = ok and int(exp) - time.time() < SESSION_S - RENEW_S
+        return ok
 
     def session_cookie(self):
         exp = int(time.time()) + SESSION_S
@@ -177,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.config.check_login(user, pw)
 
     def authorized(self):
-        """Browsers sign in on /login and get a 90-day signed cookie; scripts may send Basic auth."""
+        """Browsers sign in on /login and get a 90-day signed cookie, renewed on use; scripts may send Basic auth."""
         if self.session_ok() or self.basic_ok():
             return True
         if self.path.startswith("/api/") or self.command == "POST":

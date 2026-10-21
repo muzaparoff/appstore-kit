@@ -80,6 +80,26 @@ def _str_list(value, what):
     return [str(v) for v in value]
 
 
+def _xcuitest_tests(value, suite):
+    """Each entry is one flow: "Target/Class[/method]", or a named group
+    {name, only: [...]} run in one xcodebuild, so a long class can be split
+    into halves that run on two simulators at once."""
+    if not isinstance(value, list):
+        raise ConfigError("suite %s tests: must be a list" % suite)
+    out = []
+    for t in value:
+        if isinstance(t, str):
+            out.append({"name": t.split("/")[-1], "only": [t]})
+        elif isinstance(t, dict) and t.get("name") and t.get("only"):
+            name = str(t["name"])
+            if not NAME_RE.match(name):
+                raise ConfigError("suite %s tests: group name %r must be lowercase" % (suite, name))
+            out.append({"name": name, "only": _str_list(t["only"], "suite %s %s" % (suite, name))})
+        else:
+            raise ConfigError("suite %s tests: each entry is a string or {name, only}" % suite)
+    return out
+
+
 def validate_app(data, repo):
     if not isinstance(data, dict):
         raise ConfigError("app.yml: must be a mapping")
@@ -122,7 +142,7 @@ def validate_app(data, repo):
                 raise ConfigError("suite %s: maestro needs flows: <dir>" % name)
             suite["flows"] = str(s["flows"])
         else:
-            suite["tests"] = _str_list(s.get("tests") or [], "suite %s tests" % name)
+            suite["tests"] = _xcuitest_tests(s.get("tests") or [], name)
             if not suite["tests"]:
                 raise ConfigError("suite %s: xcuitest needs tests: [Target/Class]" % name)
         budget = parse_duration(s.get("budget", limits["suite"]), "suite %s budget" % name)
@@ -195,8 +215,8 @@ def list_flows(app, suite_name):
                           "engine": "maestro", "path": os.path.join(root, fn)})
     else:
         for t in suite["tests"]:
-            flows.append({"id": "%s/%s" % (suite_name, t.split("/")[-1]), "suite": suite_name,
-                          "engine": "xcuitest", "test": t})
+            flows.append({"id": "%s/%s" % (suite_name, t["name"]), "suite": suite_name,
+                          "engine": "xcuitest", "tests": t["only"]})
     if not flows:
         raise ConfigError("suite %s: no flows" % suite_name)
     return flows

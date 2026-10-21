@@ -3,6 +3,8 @@ xcodebuild, simctl or Maestro."""
 
 import json
 import os
+import time
+import unittest
 from unittest import mock
 
 from e2ekit import build, config, engines, proc, sims
@@ -136,3 +138,18 @@ class EngineTests(HomeCase):
         self.assertEqual(res["status"], "failed")
         self.assertIn("XCTAssertTrue failed", res["message"])
         self.assertEqual(steps, ['Tap "Buy" Button'])
+
+
+class ProcDoneTests(unittest.TestCase):
+    def test_done_line_ends_a_stalled_process_without_timeout(self):
+        t0 = time.time()
+        r = proc.run(["sh", "-c", "echo work; echo FINISHED; sleep 60"], timeout=30,
+                     done=lambda l: l == "FINISHED", grace=1)
+        self.assertFalse(r.timed_out)
+        self.assertLess(time.time() - t0, 10)
+        self.assertIn("FINISHED", r.out)
+
+    def test_suite_end_line(self):
+        m = engines.SUITE_END_RE.match("Test Suite 'Selected tests' passed at 2026-10-21 14:37:19.218.")
+        self.assertEqual(m.group(1), "passed")
+        self.assertIsNone(engines.SUITE_END_RE.match("Test Suite 'BabyLoglyUITests' passed at x"))

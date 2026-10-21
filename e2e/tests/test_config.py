@@ -89,3 +89,15 @@ class AppYmlTests(HomeCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XCUITestGroupTests(unittest.TestCase):
+    def test_string_and_group_entries_become_flows(self):
+        tests = config._xcuitest_tests(
+            ["T/C/testOne", {"name": "core-a", "only": ["T/C/testA", "T/C/testB"]}], "core")
+        self.assertEqual(tests, [{"name": "testOne", "only": ["T/C/testOne"]},
+                                 {"name": "core-a", "only": ["T/C/testA", "T/C/testB"]}])
+        with self.assertRaises(config.ConfigError):
+            config._xcuitest_tests([{"name": "Core A", "only": ["x"]}], "core")
+        with self.assertRaises(config.ConfigError):
+            config._xcuitest_tests([{"only": ["x"]}], "core")

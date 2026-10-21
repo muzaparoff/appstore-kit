@@ -54,6 +54,10 @@ def tail(path, n=40):
         return ""
 
 
+# XCTest's last summary line; after it xcodebuild only tidies up.
+SUITE_END_RE = re.compile(r"^Test Suite 'Selected tests' (passed|failed) at ")
+
+
 class RealBackend(object):
     dry_run = False
 
@@ -142,8 +146,9 @@ class RealBackend(object):
             return {"status": "failed", "message": "no .xctestrun from build-for-testing", "crash": None}
         bundle = os.path.join(outdir, "result.xcresult")
         cmd = ["xcodebuild", "test-without-building", "-xctestrun", artifacts["xctestrun"],
-               "-destination", "id=" + udid, "-only-testing:" + flow["test"],
+               "-destination", "id=" + udid,
                "-parallel-testing-enabled", "NO", "-resultBundlePath", bundle]
+        cmd += ["-only-testing:" + t for t in flow["tests"]]
 
         def line(text):
             # XCTest activity lines ("t =  1.20s Tap ...") are the live steps.
@@ -151,10 +156,19 @@ class RealBackend(object):
             if m:
                 on_step(m.group(1)[:200])
 
-        r = proc.run(cmd, timeout=timeout, log_path=os.path.join(outdir, "log.txt"), on_line=line)
-        if r.timed_out:
+        verdict = {}
+
+        def finished(text):
+            m = SUITE_END_RE.match(text)
+            if m:
+                verdict["passed"] = m.group(1) == "passed"
+            return bool(m)
+
+        r = proc.run(cmd, timeout=timeout, log_path=os.path.join(outdir, "log.txt"), on_line=line,
+                     done=finished)
+        if r.timed_out and "passed" not in verdict:
             return {"status": "timeout", "message": "test exceeded %ds" % timeout, "crash": None}
-        if r.code == 0:
+        if r.code == 0 or verdict.get("passed"):
             return {"status": "passed", "message": None, "crash": None}
         failures = self._xcresult_failures(bundle)
         msg = failures[0] if failures else "xcodebuild exited %s" % r.code

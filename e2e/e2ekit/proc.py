@@ -29,8 +29,14 @@ def _killpg(p, sig):
         pass
 
 
-def run(cmd, timeout=None, log_path=None, on_line=None, env=None, cwd=None, keep_out=True):
-    """Run cmd, stream merged stdout/stderr to log_path and on_line."""
+def run(cmd, timeout=None, log_path=None, on_line=None, env=None, cwd=None, keep_out=True,
+        done=None, grace=60):
+    """Run cmd, stream merged stdout/stderr to log_path and on_line.
+
+    `done(line)` marks the line after which the tool's work is over. Past it
+    the process gets `grace` seconds to exit and is then ended, without
+    counting as a timeout: xcodebuild can sit for minutes after its last test
+    (babylogly-3 passed 21 tests, then idled into the flow cap)."""
     log = open(log_path, "ab") if log_path else None
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          stdin=subprocess.DEVNULL, env=env, cwd=cwd,
@@ -38,7 +44,7 @@ def run(cmd, timeout=None, log_path=None, on_line=None, env=None, cwd=None, keep
     with _mu:
         _live.add(p)
     out = []
-    state = {"timed_out": False}
+    state = {"timed_out": False, "done_at": None}
 
     def reader():
         for raw in iter(p.stdout.readline, b""):
@@ -53,14 +59,30 @@ def run(cmd, timeout=None, log_path=None, on_line=None, env=None, cwd=None, keep
                     on_line(line)
                 except Exception:
                     pass
+            if done and state["done_at"] is None:
+                try:
+                    if done(line):
+                        state["done_at"] = time.time()
+                except Exception:
+                    pass
 
     t = threading.Thread(target=reader, daemon=True)
     t.start()
+    deadline = time.time() + timeout if timeout else None
     try:
-        p.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        state["timed_out"] = True
-        terminate(p)
+        while True:
+            try:
+                p.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                now = time.time()
+                if state["done_at"] is not None and now - state["done_at"] > grace:
+                    terminate(p)
+                    break
+                if deadline and now > deadline:
+                    state["timed_out"] = True
+                    terminate(p)
+                    break
     finally:
         t.join(5)
         with _mu:

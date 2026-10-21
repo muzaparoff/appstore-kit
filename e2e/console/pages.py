@@ -122,6 +122,8 @@ def layout(ctx, title, body, active="", page_data=None):
     side.append('<div class="h">Projects</div>')
     for p in projects:
         side.append('<a href="/projects/%s"%s>%s</a>' % (u(p), ' class="on"' if active == "p:" + p else "", h(p)))
+    side.append('<form class="out" method="post" action="/logout"><span class="muted">%s</span>'
+                '<button class="lnk">Sign out</button></form>' % h(ctx["user"]))
     viewer = ctx["viewer"]
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -140,6 +142,23 @@ def layout(ctx, title, body, active="", page_data=None):
         "viewpill": pill("view only") if viewer else "",
         "pdata": json_script("page-data", page_data) if page_data is not None else "",
     }
+
+
+def login_page(nxt, error=""):
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Sign in · E2E Console</title>
+<link rel="stylesheet" href="/static/console.css">
+</head><body class="signin">
+<form class="login" method="post" action="/login">
+<div class="lg"><i></i>E2E Console</div>
+<p class="err" role="alert">%s</p>
+<input type="hidden" name="next" value="%s">
+<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="User" aria-label="User" required autofocus>
+<input name="password" type="password" autocomplete="current-password" placeholder="Password" aria-label="Password" required>
+<button class="b">Sign in</button>
+</form></body></html>""" % (h(error), h(nxt))
 
 
 def error_page(ctx, code, msg):

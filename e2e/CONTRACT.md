@@ -186,11 +186,15 @@ commits, pushes, uploads or signs.
 - **operator**: POST `/api/runs` (start), POST `/api/runs/<id>/stop`
   (only runs with `requested_by == console`), POST `/api/triage`
   (→ `e2e triage`).
-  Needs basic auth (`E2E_CONSOLE_USER` / `E2E_CONSOLE_PASS` from
-  `~/.config/e2e/console.env`, mode 600, owner-written), a non-mobile UA,
+  Needs a signed-in session (see below), a non-mobile UA,
   a CSRF token, and the start form's confirm field.
 - **admin**: none in the console. CLI on the Mac only.
 
-Every request needs basic auth (Cloudflare Access sits in front of it too).
+Every request except `/login` and `/static/console.css` needs a login
+(`E2E_CONSOLE_USER` / `E2E_CONSOLE_PASS` from `~/.config/e2e/console.env`,
+mode 600, owner-written). Browsers sign in on the `/login` form and get an
+`e2e_session` cookie (HMAC-signed expiry, 90 days, HttpOnly, Secure,
+SameSite=Lax; keyed on the login, so changing the password signs everyone
+out). Scripts may send Basic auth instead. `POST /logout` clears the cookie.
 Inputs are validated against `e2e projects --json`; nothing from a request is
 ever passed to a shell.

@@ -24,6 +24,8 @@ STATIC = Path(__file__).resolve().parent / "static"
 MOBILE_RE = re.compile(r"Mobi|iPhone|iPad|iPod|Android|Silk|Kindle|BlackBerry|Opera Mini|IEMobile", re.I)
 MARKS = ("fix", "not-a-bug", "flaky")
 MAX_BODY = 16 * 1024
+COOKIE = "e2e_session"
+SESSION_S = 90 * 86400
 SSE_MAX_S = 3 * 3600
 CSP = ("default-src 'self'; img-src 'self'; media-src 'self'; style-src 'self'; script-src 'self'; "
        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
@@ -45,9 +47,21 @@ class Config:
         self.password = password.encode("utf-8")
         # Per-process secret: restarting the console invalidates old CSRF tokens.
         self.secret = secrets.token_bytes(32)
+        # Session key comes from the login, so sessions survive a restart and
+        # changing E2E_CONSOLE_PASS signs every browser out.
+        self.session_key = hashlib.sha256(b"session:" + self.user + b":" + self.password).digest()
 
     def csrf(self):
         return hmac.new(self.secret, b"csrf:" + self.user, hashlib.sha256).hexdigest()
+
+    def session_sig(self, exp):
+        return hmac.new(self.session_key, str(exp).encode(), hashlib.sha256).hexdigest()
+
+    def check_login(self, user, pw):
+        # Evaluate both compares so timing doesn't reveal which half failed.
+        u_ok = hmac.compare_digest(user, self.user)
+        p_ok = hmac.compare_digest(pw, self.password)
+        return u_ok and p_ok
 
 
 def env_path():
@@ -80,6 +94,13 @@ def load_config():
     if not user or not pw:
         raise SystemExit(ENV_HELP.format(path=path, problem="needs both E2E_CONSOLE_USER and E2E_CONSOLE_PASS"))
     return Config(user, pw)
+
+
+def safe_next(path):
+    """A local path to return to after sign-in; never another site."""
+    if not path.startswith("/") or path.startswith("//") or "\\" in path or path.startswith("/login"):
+        return "/"
+    return path[:500]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -128,30 +149,67 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- auth
 
-    def authorized(self):
-        cfg = self.config
+    def cookie(self, name):
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
+    def session_ok(self):
+        exp, _, sig = self.cookie(COOKIE).partition(".")
+        return exp.isdigit() and int(exp) > time.time() and hmac.compare_digest(sig, self.config.session_sig(exp))
+
+    def session_cookie(self):
+        exp = int(time.time()) + SESSION_S
+        return "%s=%d.%s; Max-Age=%d; Path=/; HttpOnly; Secure; SameSite=Lax" % (
+            COOKIE, exp, self.config.session_sig(exp), SESSION_S)
+
+    def basic_ok(self):
         hdr = self.headers.get("Authorization", "")
-        ok = False
-        if hdr[:6].lower() == "basic ":
-            try:
-                raw = base64.b64decode(hdr[6:].strip(), validate=True)
-                user, _, pw = raw.partition(b":")
-                # Evaluate both compares so timing doesn't reveal which half failed.
-                u_ok = hmac.compare_digest(user, cfg.user)
-                p_ok = hmac.compare_digest(pw, cfg.password)
-                ok = u_ok and p_ok
-            except (ValueError, base64.binascii.Error):
-                ok = False
-        if not ok:
-            body = b"Authentication required.\n"
-            self.send_response(401)
-            self.security_headers()
-            self.send_header("WWW-Authenticate", 'Basic realm="e2e console", charset="UTF-8"')
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        return ok
+        if hdr[:6].lower() != "basic ":
+            return False
+        try:
+            raw = base64.b64decode(hdr[6:].strip(), validate=True)
+        except (ValueError, base64.binascii.Error):
+            return False
+        user, _, pw = raw.partition(b":")
+        return self.config.check_login(user, pw)
+
+    def authorized(self):
+        """Browsers sign in on /login and get a 90-day signed cookie; scripts may send Basic auth."""
+        if self.session_ok() or self.basic_ok():
+            return True
+        if self.path.startswith("/api/") or self.command == "POST":
+            self.send_json(401, {"error": "sign in first"})
+        else:
+            # No WWW-Authenticate, so browsers show the form instead of the Basic popup.
+            self.page(401, pages.login_page(safe_next(self.path)))
+        return False
+
+    def login(self):
+        form = self.read_form()
+        nxt = safe_next(form.get("next", "/"))
+        if self.config.check_login(form.get("username", "").encode("utf-8"), form.get("password", "").encode("utf-8")):
+            return self.send(303, "", headers={"Location": nxt, "Set-Cookie": self.session_cookie()})
+        time.sleep(1)  # slows guessing
+        self.page(401, pages.login_page(nxt, "Wrong user or password."))
+
+    def logout(self):
+        self.send(303, "", headers={"Location": "/login",
+                                    "Set-Cookie": "%s=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax" % COOKIE})
+
+    def read_form(self):
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return {}
+        if n <= 0 or n > MAX_BODY:
+            return {}
+        try:
+            return {k: v[0] for k, v in parse_qs(self.rfile.read(n).decode("utf-8")).items()}
+        except UnicodeDecodeError:
+            return {}
 
     def is_mobile(self):
         return bool(MOBILE_RE.search(self.headers.get("User-Agent", "")))
@@ -165,10 +223,16 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
-        if not self.authorized():
-            return
         parts = urlsplit(self.path)
         path = parts.path
+        if path == "/static/console.css":  # the sign-in page needs it; no data in it
+            return self.static("console.css")
+        if path == "/login":
+            if self.session_ok():
+                return self.send(303, "", headers={"Location": "/"})
+            return self.page(200, pages.login_page(safe_next(parse_qs(parts.query).get("next", ["/"])[0])))
+        if not self.authorized():
+            return
         q = parse_qs(parts.query)
         try:
             self.route_get(path, q)
@@ -341,6 +405,11 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- POST
 
     def do_POST(self):
+        path = urlsplit(self.path).path
+        if path == "/login":
+            return self.login()
+        if path == "/logout":
+            return self.logout()
         if not self.authorized():
             return
         try:

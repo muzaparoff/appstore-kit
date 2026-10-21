@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -47,6 +48,11 @@ def fake_cli(argv, **kw):
     else:
         out = {}
     return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **kw):
+        return None
 
 
 class ConsoleCase(unittest.TestCase):
@@ -108,13 +114,56 @@ class ConsoleCase(unittest.TestCase):
     # -- auth and roles
 
     def test_auth_required(self):
-        for path in ("/", "/runs", "/api/runs/camipack-3", "/static/console.css"):
-            code, _, hdr = self.req(path, auth=None)
+        for path in ("/", "/runs"):
+            code, body, hdr = self.req(path, auth=None)
             self.assertEqual(code, 401, path)
-            self.assertIn("Basic", hdr["WWW-Authenticate"])
+            self.assertIsNone(hdr["WWW-Authenticate"], "form, not the Basic popup")
+            self.assertIn(b'action="/login"', body)
+        code, body, _ = self.req("/api/runs/camipack-3", auth=None)
+        self.assertEqual((code, json.loads(body)), (401, {"error": "sign in first"}))
+        self.assertEqual(self.req("/static/console.css", auth=None)[0], 200)
+        self.assertEqual(self.req("/static/console.js", auth=None)[0], 401)
         self.assertEqual(self.req("/", auth=("op", "wrong"))[0], 401)
         self.assertEqual(self.req("/", auth=("nope", "s3cret-test"))[0], 401)
         self.assertEqual(self.req("/api/runs", "POST", self.start_body(), auth=None)[0], 401)
+
+    def login(self, user, pw, nxt="/runs"):
+        body = urllib.parse.urlencode({"username": user, "password": pw, "next": nxt}).encode()
+        r = urllib.request.Request(self.base + "/login", data=body, method="POST",
+                                   headers={"Content-Type": "application/x-www-form-urlencoded"})
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with opener.open(r, timeout=10) as resp:
+                return resp.status, resp.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers
+
+    def test_login_sets_session_cookie(self):
+        code, hdr = self.login("op", "s3cret-test", "/runs")
+        self.assertEqual((code, hdr["Location"]), (303, "/runs"))
+        cookie = hdr["Set-Cookie"]
+        for flag in ("HttpOnly", "Secure", "SameSite=Lax", "Max-Age=7776000"):
+            self.assertIn(flag, cookie)
+        jar = cookie.split(";")[0]
+        self.assertEqual(self.req("/runs", auth=None, headers={"Cookie": jar})[0], 200)
+        self.assertEqual(self.req("/api/runs", "POST", self.start_body(), auth=None, headers={"Cookie": jar})[0], 201)
+        name, _, val = jar.partition("=")
+        exp, _, sig = val.partition(".")
+        forged = "%s=%d.%s" % (name, int(exp) + 1, sig)
+        self.assertEqual(self.req("/runs", auth=None, headers={"Cookie": forged})[0], 401)
+
+    def test_login_rejects_bad_password_and_foreign_next(self):
+        self.assertEqual(self.login("op", "wrong")[0], 401)
+        for nxt in ("//evil.example/", "https://evil.example/", "/\\evil.example"):
+            self.assertEqual(self.login("op", "s3cret-test", nxt)[1]["Location"], "/", nxt)
+
+    def test_logout_clears_cookie(self):
+        r = urllib.request.Request(self.base + "/logout", data=b"", method="POST")
+        try:
+            urllib.request.build_opener(NoRedirect).open(r, timeout=10)
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 303)
+            self.assertIn("Max-Age=0", e.headers["Set-Cookie"])
 
     def test_pages_render(self):
         for path in ("/", "/projects", "/projects/camipack", "/runs", "/triage", "/machine",

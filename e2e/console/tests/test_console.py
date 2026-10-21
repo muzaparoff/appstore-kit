@@ -2,6 +2,7 @@
     /usr/bin/python3 -m unittest discover -s console/tests -t .
 """
 import base64
+import http.client
 import json
 import os
 import shutil
@@ -146,6 +147,14 @@ class ConsoleCase(unittest.TestCase):
             self.assertIn(flag, cookie)
         jar = cookie.split(";")[0]
         self.assertEqual(self.req("/runs", auth=None, headers={"Cookie": jar})[0], 200)
+        # Split across headers, as Cloudflare forwards an HTTP/2 browser's cookies.
+        split = http.client.HTTPConnection(self.base[7:], timeout=10)
+        split.putrequest("GET", "/runs")
+        split.putheader("Cookie", "__cf_bm=x")
+        split.putheader("Cookie", jar)
+        split.endheaders()
+        self.assertEqual(split.getresponse().status, 200)
+        split.close()
         self.assertEqual(self.req("/api/runs", "POST", self.start_body(), auth=None, headers={"Cookie": jar})[0], 201)
         name, _, val = jar.partition("=")
         exp, _, sig = val.partition(".")

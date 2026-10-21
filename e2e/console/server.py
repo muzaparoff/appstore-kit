@@ -152,7 +152,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- auth
 
     def cookie(self, name):
-        for part in self.headers.get("Cookie", "").split(";"):
+        # HTTP/2 browsers send one cookie per header and Cloudflare forwards them
+        # that way, so read every Cookie header, not just the first.
+        for part in ";".join(self.headers.get_all("Cookie") or []).split(";"):
             k, _, v = part.strip().partition("=")
             if k == name:
                 return v

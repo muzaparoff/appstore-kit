@@ -422,6 +422,11 @@ class Handler(BaseHTTPRequestHandler):
             if not data.split_run_id(rid):
                 return self.send_json(502, {"error": "e2e run returned no run-id"})
             return self.send_json(201, {"run": rid, "url": "/runs/%s" % rid})
+        if path == "/api/projects":
+            denied = self.operator_check(body, need_confirm=False)
+            if denied:
+                return self.send_json(denied[0], {"error": denied[1]})
+            return self.add_project(body)
         m = re.match(r"^/api/runs/([^/]+)/stop$", path)
         if m:
             denied = self.operator_check(body, need_confirm=True)
@@ -445,6 +450,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(denied[0], {"error": denied[1]})
             return self.triage(body)
         return self.send_json(404, {"error": "not found"})
+
+    def add_project(self, body):
+        path, name = body.get("path"), body.get("name")
+        if not isinstance(name, str) or not data.NAME_RE.match(name) or len(name) > 40:
+            return self.send_json(400, {"error": "name: lowercase letters, digits, - or _"})
+        if not isinstance(path, str) or not path.startswith("/") or len(path) > 400 or "\x00" in path:
+            return self.send_json(400, {"error": "path must be an absolute local path"})
+        # Only folders under the owner's home: the console must not be a way
+        # to point the engine at arbitrary places on the Mac.
+        real = os.path.realpath(path)
+        if not real.startswith(os.path.realpath(os.path.expanduser("~")) + os.sep) or not os.path.exists(real):
+            return self.send_json(400, {"error": "path must exist inside your home folder"})
+        try:
+            res = cli.add(real, name)
+        except cli.CLIError as e:
+            return self.send_json(400, {"error": str(e)})
+        return self.send_json(201, res if isinstance(res, dict) else {"name": name})
 
     def triage(self, body):
         rid, flow, mark = body.get("run"), body.get("flow"), body.get("mark")

@@ -19,6 +19,20 @@
     });
   }
 
+  // ---- Add project dialog
+  var addForm = document.querySelector("[data-addform]");
+  if (addForm) {
+    var addBtn = addForm.querySelector("[data-add]");
+    var addErr = addForm.querySelector(".err");
+    addBtn.addEventListener("click", function () {
+      addErr.hidden = true;
+      addBtn.disabled = true;
+      post("/api/projects", { path: addForm.path.value.trim(), name: addForm.name.value.trim() })
+        .then(function () { location.reload(); })
+        .catch(function (e) { addErr.textContent = e.message; addErr.hidden = false; addBtn.disabled = false; });
+    });
+  }
+
   function mins(s) { return typeof s === "number" ? Math.max(1, Math.round(s / 60)) + " min" : "?"; }
 
   // ---- Run… dialog
@@ -30,6 +44,10 @@
   });
   document.querySelectorAll("dialog.modal").forEach(function (dlg) {
     var project = dlg.getAttribute("data-project");
+    if (!project) {
+      dlg.querySelector("[data-close]").addEventListener("click", function () { dlg.close(); });
+      return;
+    }
     var start = dlg.querySelector("[data-start]");
     var est = dlg.querySelector(".estline");
     var err = dlg.querySelector(".err");

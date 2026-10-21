@@ -27,8 +27,9 @@ def load_registered(name):
     if not entry:
         raise CliError("unknown project %r (register it with: e2e add <repo>)" % name)
     app = config.load_app(entry["path"])
-    if app["project"] != name:
-        raise CliError("%s/e2e/app.yml now says project %r" % (entry["path"], app["project"]))
+    # The registered name wins over app.yml's: history lives under it, so a
+    # repo can be renamed or moved without losing its runs.
+    app["project"] = name
     return app
 
 
@@ -109,8 +110,22 @@ def cmd_projects(args):
     return 0
 
 
+def repo_root(path):
+    """Accept the repo, its e2e/ folder or the app.yml itself."""
+    path = os.path.realpath(os.path.expanduser(path))
+    if os.path.isfile(path) and os.path.basename(path) == "app.yml":
+        path = os.path.dirname(path)
+    if os.path.basename(path) == "e2e" and os.path.isfile(os.path.join(path, "app.yml")):
+        path = os.path.dirname(path)
+    return path
+
+
 def cmd_add(args):
-    app = config.load_app(os.path.abspath(args.repo))
+    app = config.load_app(repo_root(args.repo))
+    if args.name:
+        if not config.NAME_RE.match(args.name):
+            raise CliError("name must be lowercase letters, digits, - or _")
+        app["project"] = args.name
     store.register_project(app["project"], app["repo"])
     emit(args, {"name": app["project"], "path": app["repo"], "suites": list(app["suites"])},
          "registered %s (%s) suites: %s" % (app["project"], app["repo"], ", ".join(app["suites"])))
@@ -343,7 +358,8 @@ def parser():
 
     sub.add_parser("projects").set_defaults(fn=cmd_projects)
     s = sub.add_parser("add")
-    s.add_argument("repo")
+    s.add_argument("repo", help="repo, its e2e/ folder, or e2e/app.yml")
+    s.add_argument("--name", help="project name (default: app.yml project); history is kept per name")
     s.set_defaults(fn=cmd_add)
     s = sub.add_parser("plan")
     s.add_argument("project")

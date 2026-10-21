@@ -239,11 +239,25 @@ def projects_page(ctx):
     m = data.machine()
     names = sorted(set(projs) | set(data.project_names()))
     cards = "".join(project_card(ctx, n, projs.get(n, {}), m["active"]) for n in names)
-    body = '<div class="mh"><h3>Projects</h3></div>%s%s<div class="proj">%s</div>' % (
-        gauges(m), '<p class="err">e2e projects: %s</p>' % h(err) if err else "",
+    add = "" if ctx["viewer"] else '<button class="b sec" data-open="add-project">+ Add project</button>'
+    body = '<div class="mh"><h3>Projects</h3>%s</div>%s%s<div class="proj">%s</div>' % (
+        add, gauges(m), '<p class="err">e2e projects: %s</p>' % h(err) if err else "",
         cards or '<p class="muted">No projects yet.</p>')
-    body += '<p class="muted small">A project is one repo with an <code>e2e/app.yml</code>. Adding one is an admin step on the Mac: <code>e2e add &lt;repo-path&gt;</code>.</p>'
+    body += '<p class="muted small">A project is a local folder with an <code>e2e/app.yml</code>. Its history is kept under its name: add the same name again with a new path and the history stays.</p>'
+    if not ctx["viewer"]:
+        body += ADD_DIALOG
     return layout(ctx, "Projects", body, "projects", {"page": "projects"})
+
+
+ADD_DIALOG = """<dialog id="add-project" class="modal">
+<form method="dialog" class="runform" data-addform>
+<div class="mh"><h3>Add project</h3></div>
+<label class="field"><span class="lbl">Local path</span><input name="path" required placeholder="/Users/sergei/GitHub/camipack" autocomplete="off" spellcheck="false"></label>
+<label class="field"><span class="lbl">Name</span><input name="name" required pattern="[a-z0-9][a-z0-9_-]*" placeholder="camipack" autocomplete="off" spellcheck="false"></label>
+<p class="muted small">The repo, its <code>e2e/</code> folder, or <code>e2e/app.yml</code>. Lowercase name; runs and history are filed under it.</p>
+<p class="err" hidden></p>
+<div class="actions"><button type="button" class="b sec" data-close>Cancel</button><button type="button" class="b" data-add>Add</button></div>
+</form></dialog>"""
 
 
 def data_projects():

@@ -126,6 +126,12 @@ def start(project, suites, mode):
     return str(res).strip()
 
 
+def add(path, name):
+    res = call(["add", path, "--name", name], timeout=30)
+    clear_cache()
+    return res
+
+
 def stop(run_id):
     res = call(["stop", run_id], timeout=30)
     clear_cache()

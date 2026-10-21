@@ -26,6 +26,18 @@ class DryRunTests(HomeCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown suite", err["error"])
 
+    def test_add_by_e2e_folder_with_name_keeps_history(self):
+        code, out = self.cli_json("add", os.path.join(self.repo, "e2e"), "--name", "renamed")
+        self.assertEqual((code, out["name"], out["path"]), (0, "renamed", os.path.realpath(self.repo)))
+        code, out = self.cli_json("run", "renamed", "--suite", "smoke", "--dry-run")
+        self.assertEqual((code, out["run"]), (0, "renamed-1"))
+        # Re-adding the same name (e.g. the repo moved) keeps its history.
+        self.cli("add", os.path.join(self.repo, "e2e", "app.yml"), "--name", "renamed")
+        code, out = self.cli_json("run", "renamed", "--suite", "smoke", "--dry-run")
+        self.assertEqual(out["run"], "renamed-2")
+        code, err = self.cli_json("add", self.repo, "--name", "Bad Name")
+        self.assertEqual(code, 1)
+
     def test_full_run_report(self):
         code, out = self.cli_json("run", "demo", "--suite", "smoke,trips,ui", "--dry-run")
         self.assertEqual((code, out["run"], out["status"]), (1, "demo-1", "failed"))

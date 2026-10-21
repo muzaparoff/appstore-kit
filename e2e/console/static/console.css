@@ -114,3 +114,5 @@ body.viewer .mtop{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;pa
 body.viewer .mtop nav{display:flex;gap:12px;width:100%;font-size:14px}
 body.viewer .side{display:none}
 body.viewer .app{grid-template-columns:1fr}
+.field{display:grid;gap:4px}
+.field input{font:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--page);color:var(--ink);min-height:40px}

@@ -39,6 +39,8 @@ def fake_cli(argv, **kw):
         out = [{"run": argv[2], "signalled": True}]
     elif cmd == "plan":
         out = {"estimate_s": 300, "sims": 2, "needs_build": True}
+    elif cmd == "add":
+        out = {"name": argv[argv.index("--name") + 1], "path": argv[2], "suites": ["smoke"]}
     elif cmd == "triage":
         out = {"run": argv[2], "flow": argv[3], "mark": argv[argv.index("--mark") + 1],
                "by": argv[argv.index("--by") + 1], "note": ""}
@@ -211,6 +213,18 @@ class ConsoleCase(unittest.TestCase):
         body = self.req("/runs/camipack-2/report")[1].decode()
         self.assertIn("tampered", body)
         self.assertNotIn("pill bad tampered", self.req("/runs/camipack-3/report")[1].decode())
+
+    def test_add_project(self):
+        repo = self.tmp / "repo"
+        (repo / "e2e").mkdir(parents=True)
+        with mock.patch.object(os.path, "expanduser", return_value=str(self.tmp)):
+            code, resp, _ = self.req("/api/projects", "POST", {"path": str(repo), "name": "newapp"})
+            self.assertEqual(code, 201, resp)
+            argv = [c.args[0] for c in self.run_mock.call_args_list if c.args[0][0] == "/nonexistent/e2e"][-1]
+            self.assertEqual(argv[1:], ["add", os.path.realpath(str(repo)), "--name", "newapp", "--json"])
+            self.assertEqual(self.req("/api/projects", "POST", {"path": "/etc", "name": "x"})[0], 400)
+            self.assertEqual(self.req("/api/projects", "POST", {"path": str(repo), "name": "Bad Name"})[0], 400)
+            self.assertEqual(self.req("/api/projects", "POST", {"path": str(repo), "name": "ok"}, ua=IPHONE)[0], 403)
 
     def test_triage_goes_through_cli(self):
         code, resp, _ = self.req("/api/triage", "POST", {"run": "camipack-3", "flow": "budget/03-huge-amount-fail",

@@ -181,10 +181,19 @@ def suite_summary(p):
     return "<span>%s</span><span>%s</span>" % (h(left), h(right))
 
 
+def norm_limits(raw):
+    """app.yml limits come as {flow, suite, run} seconds; report.json as {flow_s, ...}."""
+    lim = dict(DEFAULT_LIMITS)
+    for k, v in (raw or {}).items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            lim[k if k.endswith("_s") or k in ("sims", "retries") else k + "_s"] = v
+    return lim
+
+
 def run_dialog(ctx, name, p):
     chips = "".join('<label class="chip"><input type="checkbox" name="suite" value="%s"><span>%s</span></label>'
                     % (h(s), h(s)) for s in p.get("suites") or {})
-    lim = dict(DEFAULT_LIMITS, **{k: v for k, v in (p.get("limits") or {}).items() if isinstance(v, (int, float))})
+    lim = norm_limits(p.get("limits"))
     limits = "Hard stops: %s per flow · %s per suite · %s per run · %s sims · %s retry." % (
         mins(lim.get("flow_s")), mins(lim.get("suite_s")), mins(lim.get("run_s")), lim.get("sims"), lim.get("retries"))
     ref = " · ".join(h(p[k]) for k in ("branch", "commit") if p.get(k))
@@ -250,7 +259,7 @@ def project_page(ctx, name):
         where = info.get("flows") or info.get("tests") or ""
         rows.append("<tr><td><b>%s</b></td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
             h(s), h(info.get("engine", "")), h(where if isinstance(where, str) else ", ".join(map(str, where))),
-            h(info.get("budget", ""))))
+            h(mins(info["budget_s"]) if isinstance(info.get("budget_s"), (int, float)) else info.get("budget", ""))))
     runs = {r["run"]: r for r in data.list_runs(name, limit=100)}
     hrows = []
     for hrow in reversed(data.history(name)[-100:]):
@@ -262,6 +271,8 @@ def project_page(ctx, name):
     lrows = "".join('<tr><td><a href="/runs/%s">%s</a></td><td>%s</td><td>%s</td><td></td></tr>' % (
         u(r["run"]), h(r["run"]), status_pill(r), h(r.get("phase", ""))) for r in live)
     btn = ('<button class="b" data-open="run-%s">Run…</button>' % h(name)) if not ctx["viewer"] and p.get("suites") else ""
+    if p.get("error"):
+        err = "app.yml: %s" % p["error"]
     body = """<div class="mh"><h3>%s%s</h3>%s</div>%s
 <h4 id="suites">Suites</h4><div class="tbl"><table><tr><th>Suite</th><th>Engine</th><th>Flows / tests</th><th>Budget</th></tr>%s</table></div>
 <h4 id="history">History</h4><div class="tbl"><table><tr><th>Run</th><th>Status</th><th>Counts</th><th>Finished</th></tr>%s%s</table></div>%s""" % (
@@ -390,7 +401,7 @@ def report_page(ctx, run):
             for m, label in (("fix", "Fix it"), ("not-a-bug", "Not a bug"), ("flaky", "Flaky")))
         cards.append('<div class="failcard"><div class="scr">%s</div><div class="fc"><b>%s %s</b><span class="muted">%s</span><span class="links">%s</span>%s<div class="btns">%s</div>%s</div></div>' % (
             img, h(flow), h(f.get("kind")), h(f.get("message")), " · ".join(links), extra, btns, marked))
-    lim = run.get("limits") or {}
+    lim = norm_limits(run.get("limits")) if run.get("limits") else {}
     mach = run.get("machine") or {}
     meta = '<p class="muted small">%s · %s · limits: flow %s, suite %s, run %s, %s sims, %s retries · machine at end: RAM %s, disk %s</p>' % (
         counts_line(run.get("counts")), h(", ".join(run["request"].get("suites") or [])),

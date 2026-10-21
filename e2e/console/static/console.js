@@ -50,6 +50,7 @@
         .then(function (p) {
           if (my !== seq) return;
           var bits = ["Estimate: about " + mins(p.estimate_s)];
+          if (p.flows != null) bits.push(p.flows + " flows");
           if (p.sims != null) bits.push(p.sims + (p.sims === 1 ? " simulator" : " simulators"));
           var nb = p.needs_build != null ? p.needs_build : p.build;
           if (nb != null) bits.push(nb ? "1 build" : "build cached");

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# e2e engine CLI (see e2e/README.md). Runs from any cwd via its absolute path.
+set -euo pipefail
+
+# Resolve symlinks so a link in ~/bin still finds the repo.
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ "$SRC" != /* ]] && SRC="$DIR/$SRC"
+done
+KIT="$(cd -P "$(dirname "$SRC")/.." && pwd)"
+
+VENV="${E2E_VENV:-$HOME/.local/share/e2e/venv}"
+PY="$VENV/bin/python"
+
+# System python 3.9 + one pinned dependency, in a private venv so nothing
+# touches the system site-packages or Homebrew's python.
+if ! "$PY" -c 'import yaml' >/dev/null 2>&1; then
+  echo "e2e: creating venv at $VENV (one time)" >&2
+  mkdir -p "$(dirname "$VENV")"
+  /usr/bin/python3 -m venv "$VENV"
+  "$PY" -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2 >&2
+fi
+
+export PYTHONPATH="$KIT/e2e${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m e2ekit "$@"

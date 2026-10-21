@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 
 from . import proc, store
 
@@ -17,9 +18,28 @@ def _simctl(*args, timeout=180):
     return proc.check(["xcrun", "simctl"] + list(args), timeout=timeout)
 
 
+def _simctl_json(*args):
+    """simctl's JSON, with stderr noise skipped.
+
+    stdout and stderr arrive merged, and under launchd simctl can print a
+    warning line before the JSON (babylogly-1 died on "Expecting value").
+    Parse from the first "{", and retry once if the output is still empty."""
+    out = ""
+    for _ in range(3):
+        out = _simctl(*args)
+        start = out.find("{")
+        if start >= 0:
+            try:
+                return json.loads(out[start:])
+            except ValueError:
+                pass
+        time.sleep(2)
+    raise SimError("simctl %s gave no JSON: %r" % (" ".join(args), out[:300]))
+
+
 def devices():
     """[{udid, name, state, runtime}] for every simulator."""
-    data = json.loads(_simctl("list", "-j", "devices"))
+    data = _simctl_json("list", "-j", "devices")
     out = []
     for runtime, items in data.get("devices", {}).items():
         for d in items:
@@ -48,7 +68,7 @@ def _guard(udid):
 
 def resolve_runtime(spec):
     """'latest' or 'iOS 27.0' -> runtime identifier."""
-    data = json.loads(_simctl("list", "-j", "runtimes"))
+    data = _simctl_json("list", "-j", "runtimes")
     ios = [r for r in data.get("runtimes", [])
            if r.get("isAvailable") and r.get("platform") == "iOS"]
     if not ios:

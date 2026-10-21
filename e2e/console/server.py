@@ -9,6 +9,7 @@ import secrets
 import stat
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -177,6 +178,8 @@ class Handler(BaseHTTPRequestHandler):
             self.route_get(path, q)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except Exception:
+            self.crashed()
 
     def route_get(self, path, q):
         ctx = self.ctx()
@@ -347,6 +350,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.route_post(urlsplit(self.path).path)
         except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            self.crashed()
+
+    def crashed(self):
+        # Traceback to the log only; the client gets no paths or internals.
+        traceback.print_exc()
+        try:
+            self.send(500, "Internal error.\n", "text/plain; charset=utf-8")
+        except OSError:
             pass
 
     def read_body(self):

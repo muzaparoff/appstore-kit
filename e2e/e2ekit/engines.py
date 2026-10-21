@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 from . import build, machine, proc, sims
 
@@ -73,7 +74,10 @@ class RealBackend(object):
         try:
             sims.boot(udid)
             sims.install(udid, artifacts["app"])
-            sims.grant(udid, app["bundle_id"], app["permissions"])
+            refused = sims.grant(udid, app["bundle_id"], app["permissions"])
+            if refused:
+                print("warning: simctl privacy refused %s on %s" % (", ".join(refused), name),
+                      file=sys.stderr, flush=True)
         except Exception:
             sims.delete(udid)
             raise

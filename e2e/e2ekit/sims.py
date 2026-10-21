@@ -108,9 +108,20 @@ def install(udid, app_path):
 
 
 def grant(udid, bundle_id, permissions):
+    """Grant what simctl can; return the services it refused.
+
+    Some services can't be written to a simulator's TCC store on newer
+    runtimes (notifications on iOS 27: "Failed to create TCC authorization
+    record"). A refused grant must not sink the run: flows can still grant
+    it themselves through Maestro's launchApp permissions."""
     _guard(udid)
+    refused = []
     for p in permissions:
-        _simctl("privacy", udid, "grant", p, bundle_id)
+        try:
+            _simctl("privacy", udid, "grant", p, bundle_id)
+        except RuntimeError:
+            refused.append(p)
+    return refused
 
 
 def screenshot(udid, path):

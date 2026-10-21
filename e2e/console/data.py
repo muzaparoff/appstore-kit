@@ -1,5 +1,4 @@
 """Read-only view of $E2E_HOME (layout in e2e/CONTRACT.md)."""
-import fcntl
 import hashlib
 import json
 import os
@@ -185,18 +184,6 @@ def triage_marks(project, run_id):
         if t.get("run") == run_id and t.get("flow"):
             marks[t["flow"]] = t
     return marks
-
-
-def append_triage(project, entry):
-    """One O_APPEND write under flock, so concurrent marks never interleave."""
-    path = home() / project / "triage.ndjson"
-    line = (json.dumps(entry, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
-    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        os.write(fd, line)
-    finally:
-        os.close(fd)
 
 
 def artifact(run_id, rel):

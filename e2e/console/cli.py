@@ -132,5 +132,12 @@ def stop(run_id):
     return res
 
 
+def triage(run_id, flow, mark, by, note=""):
+    args = ["triage", run_id, flow, "--mark", mark, "--by", by]
+    if note:
+        args += ["--note", note]
+    return call(args, timeout=20)
+
+
 def status():
     return cached("status", 3, lambda: call(["status"], timeout=20))

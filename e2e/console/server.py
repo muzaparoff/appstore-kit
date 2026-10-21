@@ -82,10 +82,6 @@ def load_config():
     return Config(user, pw)
 
 
-def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "e2e-console"
     sys_version = ""
@@ -463,9 +459,10 @@ class Handler(BaseHTTPRequestHandler):
         known = {f.get("flow") for f in run.get("failures") or []} | {f.get("id") for f in run.get("flows") or []}
         if not isinstance(flow, str) or flow not in known:
             return self.send_json(400, {"error": "unknown flow"})
-        entry = {"ts": now_iso(), "run": run["run"], "flow": flow, "mark": mark,
-                 "by": "console:%s" % self.config.user.decode(), "note": note}
-        data.append_triage(run["project"], entry)
+        try:
+            entry = cli.triage(run["run"], flow, mark, "console:%s" % self.config.user.decode(), note)
+        except cli.CLIError as e:
+            return self.send_json(409, {"error": str(e)})
         return self.send_json(201, entry)
 
 

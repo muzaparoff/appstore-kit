@@ -39,6 +39,9 @@ def fake_cli(argv, **kw):
         out = [{"run": argv[2], "signalled": True}]
     elif cmd == "plan":
         out = {"estimate_s": 300, "sims": 2, "needs_build": True}
+    elif cmd == "triage":
+        out = {"run": argv[2], "flow": argv[3], "mark": argv[argv.index("--mark") + 1],
+               "by": argv[argv.index("--by") + 1], "note": ""}
     else:
         out = {}
     return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
@@ -209,18 +212,13 @@ class ConsoleCase(unittest.TestCase):
         self.assertIn("tampered", body)
         self.assertNotIn("pill bad tampered", self.req("/runs/camipack-3/report")[1].decode())
 
-    def test_triage_appends_line(self):
-        path = self.home / "camipack" / "triage.ndjson"
-        before = path.read_text().splitlines()
+    def test_triage_goes_through_cli(self):
         code, resp, _ = self.req("/api/triage", "POST", {"run": "camipack-3", "flow": "budget/03-huge-amount-fail",
                                                          "mark": "not-a-bug", "note": "expected"})
         self.assertEqual(code, 201, resp)
-        after = path.read_text().splitlines()
-        self.assertEqual(after[:len(before)], before)
-        self.assertEqual(len(after), len(before) + 1)
-        row = json.loads(after[-1])
-        self.assertEqual((row["run"], row["flow"], row["mark"], row["by"]),
-                         ("camipack-3", "budget/03-huge-amount-fail", "not-a-bug", "console:op"))
+        argv = [c.args[0] for c in self.run_mock.call_args_list if c.args[0][0] == "/nonexistent/e2e"][-1]
+        self.assertEqual(argv[1:], ["triage", "camipack-3", "budget/03-huge-amount-fail", "--mark", "not-a-bug",
+                                    "--by", "console:op", "--note", "expected", "--json"])
         self.assertEqual(self.req("/api/triage", "POST", {"run": "camipack-3", "flow": "budget/03-huge-amount-fail", "mark": "delete"})[0], 400)
         self.assertEqual(self.req("/api/triage", "POST", {"run": "camipack-3", "flow": "nope", "mark": "fix"})[0], 400)
         self.assertEqual(self.req("/api/triage", "POST", {"run": "camipack-4", "flow": "trips/07-rename", "mark": "fix"})[0], 404)

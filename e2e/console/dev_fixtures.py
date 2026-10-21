@@ -264,7 +264,13 @@ if cmd == "plan":
     n = sum(len(fx.FLOWS.get(x, [])) for x in s)
     out({"project": a[1], "suites": s, "estimate_s": 40 * n + 60, "sims": 2, "needs_build": True})
 if cmd == "status":
-    out({"machine": {"sims_cap": 3}, "active": []})
+    out({"machine": {"sims_cap": 3, "sims_busy": [], "build_busy": False}, "runs": []})
+if cmd == "triage":
+    rid, flow, mark = a[1], a[2], opt("--mark")
+    if mark not in ("fix", "not-a-bug", "flaky"): die("bad mark")
+    e = {"ts": fx.iso(fx.now()), "run": rid, "flow": flow, "mark": mark, "by": opt("--by"), "note": opt("--note", "")}
+    fx.append(home / rid.rsplit("-", 1)[0] / "triage.ndjson", e)
+    out(e)
 if cmd == "run":
     p, s = a[1], opt("--suite", "").split(",")
     if p not in fx.PROJECTS or any(x not in fx.PROJECTS[p]["suites"] for x in s): die("bad project/suite")

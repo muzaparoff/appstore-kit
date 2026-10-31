@@ -366,11 +366,14 @@ jobs:
           echo "Signed IPA produced and attached as an artifact." >> $GITHUB_STEP_SUMMARY
           ls -la build/export/*.ipa >> $GITHUB_STEP_SUMMARY
 
+      # The build is already on TestFlight by now; this copy is a convenience.
+      # A full account artifact quota must not turn a good release red.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: ${{ inputs.app_name }}-ipa-${{ github.run_number }}
           path: build/export/*.ipa
-          retention-days: 14
+          retention-days: 3
 
       - name: Clean up keychain and workspace
         if: always()

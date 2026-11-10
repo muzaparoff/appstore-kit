@@ -185,6 +185,118 @@
     es.addEventListener("end", function () { es.close(); refetch(); });
   }
 
+  // ---- Bugs: the board and one card. The cards live inside a polled fragment, so clicks are delegated.
+  var bugs = document.getElementById("bugs");
+  if (bugs) {
+    var bugErr = document.getElementById("bug-err");
+    var bugBase = "/api/bugs/" + encodeURIComponent(bugs.getAttribute("data-project")) + "/";
+    var bugBusy = false, armed = null;
+    var bugRefresh = function () {
+      return fetch(bugs.getAttribute("data-fragment"), { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.text() : null; })
+        .then(function (html) { if (html != null) bugs.innerHTML = html; }, function () {});
+    };
+    var decide = function (btn, action, body) {
+      var card = btn.closest("[data-bug]");
+      if (!card || bugBusy) return;
+      bugBusy = true;
+      btn.disabled = true;
+      bugErr.hidden = true;
+      post(bugBase + encodeURIComponent(card.getAttribute("data-bug")) + "/" + action, body)
+        .catch(function (e) { bugErr.textContent = card.getAttribute("data-bug") + ": " + e.message; bugErr.hidden = false; })
+        // Refused or not, show the card as the engine has it now.
+        .then(bugRefresh)
+        .then(function () { bugBusy = false; });
+    };
+    bugs.addEventListener("click", function (ev) {
+      var b = ev.target.closest && ev.target.closest("button");
+      if (!b || !bugs.contains(b)) return;
+      var card = b.closest("[data-bug]");
+      var box = card && card.querySelector("[data-rejectbox]");
+      if (b.hasAttribute("data-approve")) {
+        decide(b, "approve", { priority: b.getAttribute("data-approve") });
+      } else if (b.hasAttribute("data-rejectopen")) {
+        box.hidden = false;
+        box.querySelector("input").select();
+      } else if (b.hasAttribute("data-rejectcancel")) {
+        box.hidden = true;
+      } else if (b.hasAttribute("data-reject")) {
+        var reason = box.querySelector("input").value.trim();
+        if (!reason) { box.querySelector("input").focus(); return; }
+        decide(b, "reject", { reason: reason });
+      } else if (b.hasAttribute("data-reopen")) {
+        // Two taps instead of a confirm(): the first one arms the button for a few seconds.
+        if (armed === b) { armed = null; decide(b, "reopen", {}); return; }
+        armed = b;
+        b.textContent = "Tap again to reopen";
+        setTimeout(function () { if (armed === b) { armed = null; b.textContent = "Reopen"; } }, 4000);
+      }
+    });
+    bugs.addEventListener("keydown", function (ev) {
+      var box = ev.target.closest && ev.target.closest("[data-rejectbox]");
+      if (box && ev.key === "Enter") { ev.preventDefault(); box.querySelector("[data-reject]").click(); }
+    });
+    // Never under a decision in the making: an open reject box, an armed Reopen, a dialog.
+    setInterval(function () {
+      if (bugBusy || armed || document.hidden || document.querySelector("dialog[open]")) return;
+      if (bugs.querySelector("[data-rejectbox]:not([hidden])")) return;
+      bugRefresh();
+    }, viewer ? 10000 : 5000);
+  }
+
+  // ---- Add a bug (board), File as bug (Triage)
+  var bugAdd = document.querySelector("[data-bugadd]");
+  if (bugAdd) {
+    var TEXT = ["title", "do", "see", "want", "proof"];
+    var from = {};
+    var fromLine = bugAdd.querySelector("[data-from]");
+    var fileBtn = bugAdd.querySelector("[data-bugfile]");
+    var fileErr = bugAdd.querySelector(".err");
+    document.querySelectorAll("[data-filebug]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        from = JSON.parse(b.getAttribute("data-filebug"));
+        TEXT.forEach(function (k) { bugAdd.elements[k].value = from[k] || ""; });
+        fromLine.textContent = from.project + " · " + from.flow + " · run " + from.run;
+        fromLine.hidden = false;
+        fileErr.hidden = true;
+        document.getElementById("bug-add").showModal();
+      });
+    });
+    fileBtn.addEventListener("click", function () {
+      var body = { kind: bugAdd.elements.kind.value, suggest: bugAdd.elements.suggest.value };
+      TEXT.forEach(function (k) { body[k] = bugAdd.elements[k].value; });
+      if (from.flow) body.flow = from.flow;
+      if (from.run) body.run = from.run;
+      fileErr.hidden = true;
+      fileBtn.disabled = true;
+      post("/api/bugs/" + encodeURIComponent(from.project || bugAdd.getAttribute("data-for")), body)
+        .then(function () { bugAdd.reset(); location.reload(); })
+        .catch(function (e) { fileErr.textContent = e.message; fileErr.hidden = false; fileBtn.disabled = false; });
+    });
+  }
+
+  // ---- Edit a bug: only what changed is sent
+  var bugEdit = document.querySelector("[data-bugedit]");
+  if (bugEdit && bugs) {
+    var saveBtn = bugEdit.querySelector("[data-bugsave]");
+    var saveErr = bugEdit.querySelector(".err");
+    saveBtn.addEventListener("click", function () {
+      var body = {}, n = 0;
+      ["title", "do", "see", "want", "proof", "done_when"].forEach(function (k) {
+        var el = bugEdit.elements[k];
+        if (el.value !== el.defaultValue) { body[k] = el.value; n++; }
+      });
+      var pr = bugEdit.querySelector('input[name="priority"]:checked');
+      if (pr && !pr.defaultChecked) { body.priority = pr.value; n++; }
+      if (!n) { document.getElementById("bug-edit").close(); return; }
+      saveErr.hidden = true;
+      saveBtn.disabled = true;
+      post("/api/bugs/" + encodeURIComponent(bugs.getAttribute("data-project")) + "/" + encodeURIComponent(bugEdit.getAttribute("data-bugedit")) + "/edit", body)
+        .then(function () { location.reload(); })
+        .catch(function (e) { saveErr.textContent = e.message; saveErr.hidden = false; saveBtn.disabled = false; });
+    });
+  }
+
   // ---- Projects/machine: light auto-refresh, never while a dialog is open
   if (PAGE.page === "projects" || PAGE.page === "machine") {
     setInterval(function () {

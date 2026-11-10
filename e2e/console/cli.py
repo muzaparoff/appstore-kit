@@ -147,3 +147,47 @@ def triage(run_id, flow, mark, by, note=""):
 
 def status():
     return cached("status", 3, lambda: call(["status"], timeout=20))
+
+
+# ---------------------------------------------------------------- bug board
+
+BUG_TTL = 2  # the board polls; one CLI call serves every open tab for two seconds
+
+
+def bug_list(project):
+    """`e2e bug list` as the contract prints it: {"project","freeze","counts","bugs"}."""
+    return cached("bugs:" + project, BUG_TTL, lambda: call(["bug", "list", project], timeout=20))
+
+
+def bug_show(project, bug):
+    return cached("bug:%s:%s" % (project, bug), BUG_TTL, lambda: call(["bug", "show", project, bug], timeout=20))
+
+
+def text_opts(fields):
+    """Free text as one `--name=value` argv element each, so wording that starts
+    with a dash (or is exactly `--json`) can never be read as another option."""
+    return ["--%s=%s" % (k.replace("_", "-"), v) for k, v in fields]
+
+
+def bug_add_argv(project, text, kind=None, flow=None, run=None, suggest=None):
+    argv = ["bug", "add", project] + text_opts(text)
+    for flag, v in (("--kind", kind), ("--flow", flow), ("--run", run), ("--suggest", suggest)):
+        if v:
+            argv += [flag, v]
+    return argv + ["--by", "console"]
+
+
+def bug_decide_argv(project, bug, action, via, priority=None, reason=None, text=()):
+    """approve | reject | reopen | edit: the owner's word, `via` console or phone."""
+    argv = ["bug", action, project, bug] + text_opts(text)
+    if reason is not None:
+        argv += text_opts([("reason", reason)])
+    if priority:
+        argv += ["--priority", priority]
+    return argv + ["--by", "owner", "--via", via]
+
+
+def bug_write(argv):
+    res = call(argv, timeout=20)
+    clear_cache()
+    return res

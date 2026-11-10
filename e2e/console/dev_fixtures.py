@@ -5,7 +5,7 @@
     python3 e2e/console/dev_fixtures.py animate <dir> <run-id> [seconds]
 
 `make` also writes <dir>/fake-bin/e2e, a stand-in CLI (projects, plan, status,
-run --detach, stop) so the console runs its real subprocess path against it:
+run --detach, stop, triage, bug) so the console runs its real subprocess path against it:
     E2E_HOME=<dir> E2E_BIN=<dir>/fake-bin/e2e python3 -m console
 Everything follows e2e/CONTRACT.md; nothing here touches simulators or Xcode.
 """
@@ -244,6 +244,183 @@ def animate(home, run_id, seconds=30):
     finish(home, run_id, "stopped" if stopped[0] else None)
 
 
+# ---------------------------------------------------------------- bug board
+# The real board is the engine's: e2ekit/bugs.py folds bugs.ndjson and owns every
+# rule. This stand-in keeps ready-made cards in <project>/bugs.fixture.json and
+# knows only what the console asks for (list, show, add, approve, reject, reopen,
+# edit), enough to look at the page and to test the routes. Never a reference.
+
+BUG_STATES = ("found", "open", "poc", "inprogress", "testing", "done", "rejected")
+BUG_EDITABLE = ("title", "do", "see", "want", "proof", "priority", "flow", "done_when")
+
+
+def bug_path(home, project):
+    return Path(home) / project / "bugs.fixture.json"
+
+
+def bug_card(n, state, title, ago_min=0, **kw):
+    """A card in the contract's shape, with the history lines given as (type, by, fields)."""
+    t = iso(now() - timedelta(minutes=ago_min))
+    c = {"id": "B-%d" % n, "state": state, "title": title, "kind": "bug", "priority": None, "suggest": None,
+         "dry_run": False, "do": "", "see": "", "want": "", "proof": "", "flow": None, "run": None,
+         "done_when": None, "limit": None, "limit_unit": None, "agent": None, "branch": None, "rev": 1,
+         "acked": 1, "by": "lead", "reason": None, "review": None, "testing_since": None, "note": None,
+         "measures": [], "passes": 0, "last_verify": None, "created": t, "updated": t}
+    events = kw.pop("events", [])
+    c.update(kw)
+    c["history"] = [dict({"ts": t, "bug": c["id"], "type": "add", "by": c["by"], "title": title, "kind": c["kind"]},
+                         **{k: c[k] for k in ("do", "see", "want", "proof")})]
+    c["history"] += [dict({"ts": iso(now() - timedelta(minutes=m)), "bug": c["id"], "type": typ, "by": by}, **f)
+                     for m, typ, by, f in events]
+    return c
+
+
+def note(by, text, ago_min):
+    return {"ts": iso(now() - timedelta(minutes=ago_min)), "by": by, "text": text}
+
+
+def make_bugs(home):
+    """Practice cards for camipack, one or two per state. Ages are relative to now."""
+    failed = [{"name": "red", "ok": True, "detail": "trips/05-delete-joined-flaky failed in camipack-2"},
+              {"name": "green", "ok": False, "detail": "trips/05-delete-joined-flaky on branch fix/b3-tab-bar-keyboard: "
+               "camipack-7 passed, camipack-8 passed (need 3 passes in a row, first try)"},
+              {"name": "suite", "ok": False, "detail": "no whole-suite run of trips on branch fix/b3-tab-bar-keyboard since testing"},
+              {"name": "review", "ok": True, "detail": "checked by reviewer"},
+              {"name": "rev", "ok": True, "detail": "rev 2, agent read rev 2"}]
+    passed = [dict(k, ok=True, detail="ok") for k in failed]
+    cards = [
+        bug_card(1, "rejected", "Tab bar floats above the edge", 600, priority="P2", reason="same as B-2",
+                 do="Open any tab on a small phone.", see="A gap under the tab bar.", want="Tab bar sits on the edge.",
+                 events=[(590, "approve", "owner", {"via": "chat", "priority": "P2"}),
+                         (580, "reject", "owner", {"via": "console", "reason": "same as B-2"})]),
+        bug_card(2, "done", "Sheet stops short of the title", 600, priority="P2", agent="fixer-1",
+                 branch="fix/b2-sheet-title", flow="trips/02-open-from-link", done_when="trips/02 passes 3 runs in a row.",
+                 do="Open a day. Pull the sheet all the way up.", see="The sheet stops below the title.",
+                 want="The sheet reaches the title.", proof="Screenshot in run camipack-2.",
+                 last_verify={"ts": iso(now() - timedelta(minutes=200)), "ok": True, "checks": passed},
+                 events=[(590, "approve", "owner", {"via": "chat", "priority": "P2"}),
+                         (200, "verify", "engine", {"ok": True, "checks": passed})]),
+        bug_card(3, "testing", "Tab bar jumps when the keyboard opens", 300, priority="P2", agent="fixer-2",
+                 branch="fix/b3-tab-bar-keyboard", flow="trips/05-delete-joined-flaky", rev=2, acked=2,
+                 done_when="trips/05 passes 3 runs in a row; the trips suite passes.",
+                 do="Open a trip. Tap the name field.", see="The tab bar jumps up with the keyboard.",
+                 want="The tab bar stays put.", proof="Video in run camipack-2.",
+                 note=note("fixer-2", "two green runs, waiting for the third", 6), passes=2,
+                 testing_since=iso(now() - timedelta(minutes=40)),
+                 review={"ts": iso(now() - timedelta(minutes=20)), "by": "reviewer", "ok": True, "text": "light and dark look right"},
+                 last_verify={"ts": iso(now() - timedelta(minutes=5)), "ok": False, "checks": failed},
+                 events=[(290, "approve", "owner", {"via": "phone", "priority": "P2"}),
+                         (40, "move", "fixer-2", {"to": "testing", "branch": "fix/b3-tab-bar-keyboard"}),
+                         (20, "review", "reviewer", {"ok": True, "text": "light and dark look right"}),
+                         (6, "note", "fixer-2", {"text": "two green runs, waiting for the third"}),
+                         (5, "verify", "engine", {"ok": False, "checks": failed})]),
+        bug_card(4, "inprogress", "Packing list stutters while dragging", 240, kind="lag", priority="P1", agent="fixer-1",
+                 branch="fix/b4-packing-drag", flow="trips/07-rename", limit=16, limit_unit="ms",
+                 done_when="Drag frame time under 16 ms; trips/07 passes 3 runs in a row.",
+                 do="Open Packing. Hold an item. Drag down ten rows.", see="The list stutters. The item lags behind the finger.",
+                 want="The item follows the finger.", proof="Before video, speed trace.",
+                 note=note("fixer-1", "list redraws every row on drag; moving the row state out of the list", 2),
+                 measures=[{"ts": iso(now() - timedelta(minutes=120)), "by": "reproducer", "value": 41, "unit": "ms", "run": "camipack-3"}],
+                 events=[(230, "approve", "owner", {"via": "chat", "priority": "P1"}),
+                         (2, "note", "fixer-1", {"text": "list redraws every row on drag; moving the row state out of the list"})]),
+        bug_card(5, "inprogress", "Trip name is cut off in the share sheet", 200, priority="P3", agent="fixer-2",
+                 branch="fix/b5-share-title", flow="trips/01-create-trip", done_when="trips/01 passes 3 runs in a row.",
+                 do="Share a trip with a long name.", see="The name ends in the middle of a word.", want="The name wraps to two lines.",
+                 proof="Screenshot.", note=note("fixer-2", "looking at the share card layout", 47),
+                 events=[(190, "approve", "owner", {"via": "chat", "priority": "P3"}),
+                         (47, "note", "fixer-2", {"text": "looking at the share card layout"})]),
+        bug_card(6, "poc", "Map freezes about 1 s when a day opens", 90, kind="lag", priority="P1", agent="reproducer",
+                 by="reproducer", do="Open a day.", see="The map freezes about 1 s.", want="No freeze.",
+                 proof="Video in run camipack-3.", note=note("reproducer", "writing the failing test", 1),
+                 events=[(80, "approve", "owner", {"via": "phone", "priority": "P1"}),
+                         (1, "note", "reproducer", {"text": "writing the failing test"})]),
+        bug_card(7, "open", "Offline map sheet control fails", 60, priority="P2",
+                 do="Open the offline map. Tap the sheet handle.", see="Nothing happens.", want="The sheet opens.",
+                 proof="Steps in the card.", events=[(50, "approve", "owner", {"via": "console", "priority": "P2"})]),
+        bug_card(8, "found", "Days list stutters on fast scroll", 12, kind="lag", suggest="P1", by="reproducer",
+                 do="Open a 14-day trip. Scroll Days fast.", see="The list stutters.", want="Smooth scroll.",
+                 proof="Video 6 s, trace."),
+        bug_card(9, "found", "Budget crashes on a huge amount", 4, suggest="P2", by="console", run="camipack-3",
+                 flow="budget/03-huge-amount-fail", do="Open the Rome trip. Budget > Add expense. Type 1e309 in Amount. Tap Save.",
+                 see="The app crashes.", want="The amount is refused with a message.",
+                 proof="Failed flow budget/03-huge-amount-fail in run camipack-3 (screenshot, video)", dry_run=True),
+    ]
+    write_json(bug_path(home, "camipack"), cards)
+
+
+def fake_bug(home, a):
+    """`e2e bug <a…>` against the fixture cards → (answer, exit code)."""
+    act, project, pos, opts = a[0], a[1], [], {}
+    rest = list(a[2:])
+    while rest:
+        x = rest.pop(0)
+        if not x.startswith("--"):
+            pos.append(x)
+        elif "=" in x:
+            k, _, v = x[2:].partition("=")
+            opts[k.replace("-", "_")] = v
+        else:
+            opts[x[2:].replace("-", "_")] = rest.pop(0)
+    if project not in PROJECTS:
+        return {"error": "unknown project %r (register it with: e2e add <repo>)" % project}, 1
+    path = bug_path(home, project)
+    cards = json.loads(path.read_text()) if path.exists() else []
+    public = lambda c: {k: v for k, v in c.items() if k != "history"}  # noqa: E731
+    if act == "list":
+        cards.sort(key=lambda c: (BUG_STATES.index(c["state"]), c["priority"] or c["suggest"] or "P9", int(c["id"][2:])))
+        return {"project": project, "freeze": any(not c["dry_run"] and c["state"] not in ("done", "rejected") for c in cards),
+                "counts": {s: sum(c["state"] == s for c in cards) for s in BUG_STATES},
+                "bugs": [public(c) for c in cards]}, 0
+    if act == "add":
+        if not opts.get("title"):
+            return {"error": "--title is required"}, 1
+        c = bug_card(len(cards) + 1, "found", opts["title"], kind=opts.get("kind", "bug"), suggest=opts.get("suggest"),
+                     flow=opts.get("flow"), run=opts.get("run"), by=opts["by"], acked=0,
+                     **{k: opts.get(k, "") for k in ("do", "see", "want", "proof")})
+        cards.append(c)
+        write_json(path, cards)
+        return public(c), 0
+    c = next((c for c in cards if pos and c["id"] == pos[0]), None)
+    if not c:
+        return {"error": "no bug %s" % (pos[0] if pos else "")}, 1
+    if act == "show":
+        return c, 0
+    st, bug = c["state"], c["id"]
+    event = {"ts": iso(now()), "bug": bug, "type": act, "by": opts.get("by")}
+    if opts.get("via"):
+        event["via"] = opts["via"]
+    if act == "approve":
+        if st != "found":
+            return {"error": "%s is %s; only a found bug can be approved" % (bug, st)}, 1
+        c.update(state="open", priority=opts["priority"])
+        event["priority"] = opts["priority"]
+    elif act == "reject":
+        if st in ("done", "rejected"):
+            return {"error": "%s is %s; reopen it first" % (bug, st)}, 1
+        c.update(state="rejected", reason=opts["reason"])
+        event["reason"] = opts["reason"]
+    elif act == "reopen":
+        if st not in ("done", "rejected"):
+            return {"error": "%s is %s; only a done or rejected bug can be reopened" % (bug, st)}, 1
+        c.update(state="open", agent=None, branch=None, testing_since=None, review=None, reason=None)
+    elif act == "edit":
+        if st in ("done", "rejected"):
+            return {"error": "%s is %s; reopen it first" % (bug, st)}, 1
+        fields = {k: opts[k] for k in BUG_EDITABLE if k in opts}
+        if not fields:
+            return {"error": "nothing to change"}, 1
+        c.update(fields, rev=c["rev"] + 1)
+        if st in ("inprogress", "testing"):
+            c.update(state="poc", testing_since=None, review=None)
+        event.update(fields)
+    else:
+        return {"error": "the fixture CLI cannot %s a bug" % act}, 1
+    c["history"].append(event)
+    c["updated"] = event["ts"]
+    write_json(path, cards)
+    return public(c), 0
+
+
 FAKE_CLI = '''#!/usr/bin/env python3
 # Stand-in for bin/e2e, generated by e2e/console/dev_fixtures.py. Dev only.
 import json, os, signal, subprocess, sys
@@ -271,6 +448,9 @@ if cmd == "triage":
     e = {"ts": fx.iso(fx.now()), "run": rid, "flow": flow, "mark": mark, "by": opt("--by"), "note": opt("--note", "")}
     fx.append(home / rid.rsplit("-", 1)[0] / "triage.ndjson", e)
     out(e)
+if cmd == "bug":
+    res, code = fx.fake_bug(home, a[1:])
+    print(json.dumps(res)); sys.exit(code)
 if cmd == "run":
     p, s = a[1], opt("--suite", "").split(",")
     if p not in fx.PROJECTS or any(x not in fx.PROJECTS[p]["suites"] for x in s): die("bad project/suite")
@@ -330,6 +510,7 @@ def make(home):
     st = json.loads((home / "babylogly/runs" / b / "state.json").read_text())
     st.update(phase="build-for-testing", elapsed_s=120, estimate_s=360)
     write_json(home / "babylogly/runs" / b / "state.json", st)
+    make_bugs(home)
     fake = home / "fake-bin" / "e2e"
     fake.parent.mkdir()
     fake.write_text(FAKE_CLI % {"console_dir": str(Path(__file__).resolve().parent), "home": str(home)})

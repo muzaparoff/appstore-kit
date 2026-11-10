@@ -49,12 +49,18 @@ def gb(v):
     return "%.1f GB" % v if isinstance(v, (int, float)) else "–"
 
 
-def ago(iso):
+def age_s(iso):
+    """Seconds since an ISO timestamp, or None when it is not one."""
     try:
-        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+        return time.time() - datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
     except ValueError:
+        return None
+
+
+def ago(iso):
+    d = age_s(iso)
+    if d is None:
         return h(iso)
-    d = time.time() - t
     if d < 90:
         return "just now"
     if d < 5400:
@@ -111,13 +117,13 @@ def integrity_pill(run):
 
 # ---------------------------------------------------------------- layout
 
-def layout(ctx, title, body, active="", page_data=None):
+def layout(ctx, title, body, active="", page_data=None, viewer_pill="view only"):
     projects = data.project_names()
     live = len([r for r in data.active_runs() if not r["stale"]])
     side = ['<div class="lg"><i></i>E2E Console</div>']
     for key, label, extra in (("projects", "Projects", ""),
                               ("runs", "Runs", pill("%d live" % live) if live else ""),
-                              ("triage", "Triage", ""), ("machine", "Machine", "")):
+                              ("bugs", "Bugs", ""), ("triage", "Triage", ""), ("machine", "Machine", "")):
         side.append('<a href="/%s"%s>%s %s</a>' % (key, ' class="on"' if active == key else "", label, extra))
     side.append('<div class="h">Projects</div>')
     for p in projects:
@@ -133,13 +139,13 @@ def layout(ctx, title, body, active="", page_data=None):
 <link rel="stylesheet" href="/static/console.css">
 <script src="/static/console.js" defer></script>
 </head><body class="%(bodycls)s">
-<header class="mtop"><b>E2E Console</b>%(viewpill)s<nav><a href="/projects">Projects</a><a href="/runs">Runs</a><a href="/triage">Triage</a><a href="/machine">Machine</a></nav></header>
+<header class="mtop"><b>E2E Console</b>%(viewpill)s<nav><a href="/projects">Projects</a><a href="/runs">Runs</a><a href="/bugs">Bugs</a><a href="/triage">Triage</a><a href="/machine">Machine</a></nav></header>
 <div class="app"><nav class="side">%(side)s</nav>
 <main class="main">%(body)s</main></div>%(pdata)s
 </body></html>""" % {
         "csrf": h(ctx["csrf"]), "title": h(title), "side": "".join(side), "body": body,
         "bodycls": "viewer" if viewer else "operator",
-        "viewpill": pill("view only") if viewer else "",
+        "viewpill": pill(viewer_pill) if viewer else "",
         "pdata": json_script("page-data", page_data) if page_data is not None else "",
     }
 
@@ -473,20 +479,51 @@ def junit_page(ctx, run):
     return layout(ctx, rid + " JUnit", body, "runs")
 
 
+def bug_prefill(project, run, f):
+    """What "File as bug" puts in the add form for one failed flow; the operator edits it before filing."""
+    flow, msg = str(f.get("flow") or ""), str(f.get("message") or "")
+    seen = ", ".join(k for k in ("screenshot", "video") if f.get(k)) or "report"
+    return {"project": project, "run": run["run"], "flow": flow,
+            "title": (msg or "%s %s" % (flow, f.get("kind") or "failed"))[:200],
+            "do": ". ".join(str(x) for x in f.get("repro") or [])[:2000], "see": msg[:2000],
+            "proof": "Failed flow %s in run %s (%s)" % (flow, run["run"], seen)}
+
+
+def triage_row(ctx, name, run, f, marks, filed, can_file):
+    flow = f.get("flow")
+    right = pill(marks[flow].get("mark"), "good") if flow in marks else pill("open", "warn")
+    bug = filed.get((run["run"], flow))
+    if bug:
+        right += ' <a class="pill live" href="/bugs/%s/%s">%s</a>' % (u(name), u(bug), h(bug))
+    elif can_file:
+        right += ' <button class="b sec sm" data-filebug="%s">File as bug</button>' % h(json.dumps(bug_prefill(name, run, f)))
+    return '<div class="fl"><span class="fail">✕</span><span>%s <span class="muted">%s</span></span><span class="tr">%s</span></div>' % (
+        h(flow), h(f.get("kind")), right)
+
+
 def triage_page(ctx):
+    from console import cli
+    registered = cli.projects_or_empty()[0]
     blocks = []
     for name in data.project_names():
         done = [r for r in data.list_runs(name, limit=10) if r["has_report"] and r.get("failures")]
+        filed = {}
+        if done and name in registered:
+            try:
+                filed = {(c.get("run"), c.get("flow")): c.get("id") for c in cli.bug_list(name).get("bugs") or []
+                         if c.get("run") and c.get("flow")}
+            except (cli.CLIError, AttributeError):
+                pass  # no board for this project: the rows still render
         for r in done[:3]:
             marks = data.triage_marks(name, r["run"])
-            items = "".join('<div class="fl"><span class="fail">✕</span><span>%s <span class="muted">%s</span></span><span>%s</span></div>' % (
-                h(f.get("flow")), h(f.get("kind")),
-                pill(marks[f.get("flow")].get("mark"), "good") if f.get("flow") in marks else pill("open", "warn"))
-                for f in r["failures"])
+            items = "".join(triage_row(ctx, name, r, f, marks, filed, not ctx["viewer"] and name in registered)
+                            for f in r["failures"])
             blocks.append('<h4><a href="/runs/%s/report">%s</a> %s</h4><div class="flows">%s</div>' % (
                 u(r["run"]), h(r["run"]), integrity_pill(r), items))
-    body = '<div class="mh"><h3>Triage</h3></div><p class="muted small">Failures of the last three finished runs per project. Marks go to an append-only triage.ndjson; reports never change.</p>%s' % (
+    body = '<div class="mh"><h3>Triage</h3></div><p class="muted small">Failures of the last three finished runs per project. Marks go to an append-only triage.ndjson; reports never change. A failure worth fixing becomes a card on the Bugs board.</p>%s' % (
         "".join(blocks) or '<p class="muted">Nothing to triage.</p>')
+    if not ctx["viewer"]:
+        body += bug_add_dialog()
     return layout(ctx, "Triage", body, "triage", {"page": "triage"})
 
 
@@ -512,3 +549,333 @@ def machine_page(ctx):
         golden or '<tr><td colspan="2" class="muted">None yet.</td></tr>',
         h(", ".join(m["locks"]) or "none"), h(st))
     return layout(ctx, "Machine", body, "machine", {"page": "machine"})
+
+
+# ---------------------------------------------------------------- bugs
+# Cards come from `e2e bug list|show --json` (CONTRACT.md "Bug board"); nothing here
+# decides what a card may do next. The engine refuses a wrong move and says why.
+
+BUG_STATES = (("found", "Needs you"), ("open", "Open"), ("poc", "POC"), ("inprogress", "In progress"),
+              ("testing", "Testing"), ("done", "Done"), ("rejected", "Rejected"))
+BUG_WORKING = ("poc", "inprogress", "testing")
+BUG_PRIORITIES = ("P1", "P2", "P3")
+BUG_FIELDS = (("do", "Do"), ("see", "See"), ("want", "Want"), ("proof", "Proof"))
+# An agent on a card notes it as it goes: the note is its heartbeat. Older than
+# this on a card somebody is working on, and the agent has probably stopped.
+BUG_STALE_S = 15 * 60
+BUG_PASSES = 3  # runs in a row the engine wants before Done
+BUG_REASON_MAX = 500
+BUG_PILL = "view + decide"  # a phone is a viewer that may approve, reject and reopen
+
+
+def cut(v, n):
+    v = "" if v is None else str(v)
+    return v if len(v) <= n else v[:n - 1].rstrip() + "…"
+
+
+def when(iso):
+    return '<span title="%s">%s</span>' % (h(iso), ago(iso))
+
+
+def bug_prio(c):
+    p = c.get("priority")
+    if p in BUG_PRIORITIES:
+        return '<span class="pr %s">%s</span>' % (p.lower(), p)
+    if c.get("state") != "found":
+        return ""
+    s = c.get("suggest")
+    return '<span class="pr q" title="the finder\'s suggestion">%s?</span>' % (s if s in BUG_PRIORITIES else "P")
+
+
+def bug_stale(c):
+    note = c.get("note") if isinstance(c.get("note"), dict) else {}
+    age = age_s(note.get("ts")) if note else None
+    return c.get("state") in BUG_WORKING and age is not None and age > BUG_STALE_S
+
+
+def bug_note(c, full=False):
+    """agent · "last note" · its age, marked stale when the heartbeat stopped."""
+    note = c.get("note") if isinstance(c.get("note"), dict) else None
+    bits = [h(c.get("agent") or "nobody yet")]
+    if note:
+        text = note.get("text") if full else cut(note.get("text"), 160)
+        by = note.get("by")
+        bits.append("“%s”%s" % (h(text), " (%s)" % h(by) if by and by != c.get("agent") else ""))
+        bits.append(when(note.get("ts")) + (" " + pill("stale", "bad") if bug_stale(c) else ""))
+    elif c.get("agent"):
+        bits.append("no note yet")
+    return " · ".join(bits)
+
+
+def bug_checks(checks):
+    items = []
+    for k in checks if isinstance(checks, list) else []:
+        if isinstance(k, dict):
+            ok = bool(k.get("ok"))
+            items.append('<li><b class="%s">%s %s %s</b> <span class="muted">%s</span></li>' % (
+                "pass" if ok else "fail", "✓" if ok else "✕", h(k.get("name")), "ok" if ok else "not ok", h(k.get("detail"))))
+    return '<ul class="checks">%s</ul>' % "".join(items) if items else ""
+
+
+def bug_testing(c):
+    """Passes out of three, and what the last `bug verify` said."""
+    passes = c.get("passes") if isinstance(c.get("passes"), int) else 0
+    out = '<div class="m"><b>Pass %d of %d</b></div>' % (passes, BUG_PASSES)
+    v = c.get("last_verify") if isinstance(c.get("last_verify"), dict) else None
+    if v:
+        out += '<div class="m">Last verify %s: %s</div>%s' % (
+            when(v.get("ts")), "all checks ok" if v.get("ok") else "not done yet", bug_checks(v.get("checks")))
+    return out
+
+
+def bug_actions(c):
+    """The owner's three decisions; the same buttons on the Mac and on the phone.
+    The finder's suggested priority is the filled button."""
+    st = c.get("state")
+    reject = '<button class="b dan" data-rejectopen>Not a bug…</button>'
+    if st == "found":
+        sug = c.get("suggest")
+        btns = '<span class="lbl">Bug, priority</span>' + "".join(
+            '<button class="b%s" data-approve="%s">%s</button>' % ("" if p == sug else " sec", p, p)
+            for p in BUG_PRIORITIES) + reject
+    elif st in ("done", "rejected"):
+        return '<div class="btns"><button class="b sec" data-reopen>Reopen</button></div>'
+    else:
+        btns = reject
+    return """<div class="btns">%s</div>
+<div class="rej" data-rejectbox hidden><input name="reason" maxlength="%d" value="not a bug" aria-label="Reason" placeholder="Why? not a bug, same as B-4…" autocomplete="off"><button class="b dan" data-reject>Reject</button><button class="b sec" data-rejectcancel>Cancel</button></div>""" % (
+        btns, BUG_REASON_MAX)
+
+
+def bug_who(c):
+    bits = [h(c.get("kind") or "bug")]
+    if c.get("by"):
+        bits.append("by %s" % h(c["by"]))
+    if c.get("run"):
+        bits.append("from run %s" % h(c["run"]))
+    if c.get("dry_run"):
+        bits.append("practice")
+    return " · ".join(bits)
+
+
+def bug_card(project, c):
+    """One card on the board. A found card is spelled out, because the owner decides on it right here."""
+    bid, st = str(c.get("id") or ""), c.get("state")
+    head = '<div class="id"><span><a href="/bugs/%s/%s">%s</a> · %s</span>%s</div><div class="t">%s</div>' % (
+        u(project), u(bid), h(bid), bug_who(c), bug_prio(c), h(c.get("title")))
+    if st == "found":
+        rows = "".join("<i>%s</i><span>%s</span>" % (label, h(c.get(k)) or "–") for k, label in BUG_FIELDS)
+        return '<div class="bc need" data-bug="%s">%s<div class="bkv">%s</div>%s</div>' % (h(bid), head, rows, bug_actions(c))
+    body = ""
+    if st in BUG_WORKING or st == "open":
+        body += '<div class="m">%s</div>' % bug_note(c)
+    if c.get("branch"):
+        body += '<div class="m">branch <code>%s</code></div>' % h(c["branch"])
+    if st == "testing":
+        body += bug_testing(c)
+    elif st == "done":
+        v = c.get("last_verify") if isinstance(c.get("last_verify"), dict) else {}
+        body += '<div class="m ok">✓ verified by the engine %s</div>' % (when(v.get("ts")) if v.get("ts") else "")
+    elif st == "rejected":
+        body += '<div class="m">Rejected: %s</div>' % h(cut(c.get("reason"), 160))
+    if st in ("done", "rejected"):
+        body += bug_actions(c)
+    return '<div class="bc%s" data-bug="%s">%s%s</div>' % (" stale" if bug_stale(c) else "", h(bid), head, body)
+
+
+def bug_board_fragment(ctx, project, board, err=None):
+    """The part of the board that polling refreshes."""
+    if err or not isinstance(board, dict):
+        return '<p class="err">e2e bug list: %s</p>' % h(err or "unexpected answer")
+    cards = [c for c in board.get("bugs") or [] if isinstance(c, dict)]
+    by_state = {s: [c for c in cards if c.get("state") == s] for s, _ in BUG_STATES}
+    closed = len(by_state["done"]) + len(by_state["rejected"])
+    segs = "".join(
+        '<a href="#s-%s"%s>%s %d</a>' % (s, ' class="on"' if s == "found" else "", label, len(by_state[s]))
+        if by_state[s] else "<span>%s 0</span>" % label for s, label in BUG_STATES)
+    out = ['<div class="segs">%s</div><p class="muted small">%d open of %d</p>' % (segs, len(cards) - closed, len(cards))]
+    if board.get("freeze"):
+        out.append('<div class="freeze"><b>Design freeze: on</b><span>A card is still outside Done or Rejected: '
+                   'no new feature commits and no push. It lifts by itself when the last card closes.</span></div>')
+    for s, label in BUG_STATES:
+        rows = "".join(bug_card(project, c) for c in by_state[s])
+        if s == "found":
+            out.append('<h4 id="s-found" class="need">Needs you %s</h4>' % pill(len(by_state[s])))
+            out.append('<div class="bcards">%s</div>' % rows if rows else
+                       '<p class="muted">Nothing waits for you.</p>')
+            if rows:
+                out.append('<p class="muted small">New bugs wait here until you say it is a bug and give a priority. No agent starts before that.</p>')
+        elif rows:
+            out.append('<h4 id="s-%s">%s %s</h4><div class="bcards">%s</div>' % (s, label, pill(len(by_state[s])), rows))
+    return "".join(out)
+
+
+BUG_ERR = '<p class="err" id="bug-err" role="alert" hidden></p>'
+
+
+def bug_text_fields(names, values=None, need_title=True):
+    out = []
+    for name, label, cap in names:
+        v = h((values or {}).get(name))
+        if name == "title":
+            out.append('<label class="field"><span class="lbl">%s</span><input name="title" maxlength="%d" value="%s"%s autocomplete="off"></label>' % (
+                label, cap, v, " required" if need_title else ""))
+        else:
+            # The newline after the tag is dropped by the parser; without it a value starting with one would lose it.
+            out.append('<label class="field"><span class="lbl">%s</span><textarea name="%s" maxlength="%d" rows="2">\n%s</textarea></label>' % (
+                label, name, cap, v))
+    return "".join(out)
+
+
+def chips(name, options, checked):
+    return '<div class="chk">%s</div>' % "".join(
+        '<label class="chip"><input type="radio" name="%s" value="%s"%s><span>%s</span></label>' % (
+            name, h(v), " checked" if v == checked else "", h(label)) for v, label in options)
+
+
+ADD_FIELDS = (("title", "Title", 200), ("do", "Do: what you do", 2000), ("see", "See: what happens", 2000),
+              ("want", "Want: what should happen", 2000), ("proof", "Proof: where the evidence is", 2000))
+EDIT_FIELDS = ADD_FIELDS + (("done_when", "Done when", 2000),)
+
+
+def bug_add_dialog(project=""):
+    """Operator only. On Triage the project, flow and run come from the row ("File as bug")."""
+    return """<dialog id="bug-add" class="modal">
+<form method="dialog" class="runform" data-bugadd data-for="%s">
+<div class="mh"><h3>Add a bug</h3></div>
+<p class="muted small" data-from hidden></p>
+%s
+<div><div class="lbl">Kind</div>%s</div>
+<div><div class="lbl">Your guess at the priority</div>%s</div>
+<p class="muted small">The card lands in “Needs you”. Nobody works on it until it is approved with a priority.</p>
+<p class="err" hidden></p>
+<div class="actions"><button type="button" class="b sec" data-close>Cancel</button><button type="button" class="b" data-bugfile>Add bug</button></div>
+</form></dialog>""" % (h(project), bug_text_fields(ADD_FIELDS),
+                       chips("kind", (("bug", "Bug"), ("lag", "Lag")), "bug"),
+                       chips("suggest", (("", "None"),) + tuple((p, p) for p in BUG_PRIORITIES), ""))
+
+
+def bug_board_page(ctx, project, board, err=None):
+    add = "" if ctx["viewer"] else '<button class="b sec" data-open="bug-add">+ Add bug</button>'
+    body = '<div class="mh"><h3>%sBugs · %s</h3>%s</div>%s<div id="bugs" class="bugs" data-project="%s" data-fragment="/bugs/%s/fragment">%s</div>' % (
+        icon(project), h(project), add, BUG_ERR, h(project), u(project), bug_board_fragment(ctx, project, board, err))
+    if not ctx["viewer"]:
+        body += bug_add_dialog(project)
+    return layout(ctx, "Bugs · " + project, body, "bugs", {"page": "bugs"}, viewer_pill=BUG_PILL)
+
+
+def bugs_index_page(ctx, boards):
+    """Pick a project. `boards` is {name: `bug list` answer, or {"error": text}}."""
+    cards = []
+    for name, b in boards.items():
+        states = [c.get("state") for c in b.get("bugs") or [] if isinstance(c, dict)]
+        found = states.count("found")
+        if b.get("error"):
+            line = '<span class="err">e2e bug list: %s</span>' % h(b["error"])
+        elif not states:
+            line = "<span>No cards.</span>"
+        else:
+            line = "<span>%s</span><span>%d open</span><span>%d working</span><span>%d done</span>" % (
+                '<b class="flaky">%d need you</b>' % found if found else "0 need you",
+                states.count("open"), len([x for x in states if x in BUG_WORKING]), states.count("done"))
+        cards.append('<div class="pc"><div class="t">%s%s %s</div><div class="kv">%s</div><div class="btns"><a class="b sec" href="/bugs/%s">Board</a></div></div>' % (
+            icon(name), h(name), pill("design freeze", "warn") if b.get("freeze") else "", line, u(name)))
+    body = '<div class="mh"><h3>Bugs</h3></div><div class="proj">%s</div>' % (
+        "".join(cards) or '<p class="muted">No projects yet.</p>')
+    return layout(ctx, "Bugs", body, "bugs", {"page": "bugs-index"}, viewer_pill=BUG_PILL)
+
+
+def bug_value(v):
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(bug_value(x) for x in v)
+    return "" if v is None else str(v)
+
+
+def bug_history(c):
+    """Every line of the card, newest first, as the engine wrote it."""
+    rows = []
+    for e in reversed(c.get("history") if isinstance(c.get("history"), list) else []):
+        if not isinstance(e, dict):
+            continue
+        extra = "".join(
+            bug_checks(v) if k == "checks" else '<div class="m"><i>%s</i> %s</div>' % (h(k.replace("_", " ")), h(cut(bug_value(v), 600)))
+            for k, v in e.items() if k not in ("ts", "bug", "type", "by", "via"))
+        rows.append('<div class="bc"><div class="id"><span><b>%s</b> · %s%s</span>%s</div>%s</div>' % (
+            h(e.get("type")), h(e.get("by")), " · via %s" % h(e["via"]) if e.get("via") else "", when(e.get("ts")), extra))
+    return "".join(rows) or '<p class="muted">No history.</p>'
+
+
+def bug_run_link(run):
+    return '<a href="/runs/%s/report">%s</a>' % (u(run), h(run)) if data.split_run_id(str(run)) else h(run)
+
+
+def bug_card_fragment(ctx, project, c):
+    """The card page's refreshing part: the card as it stands, then its history."""
+    bid, st = str(c.get("id") or ""), c.get("state")
+    label = dict(BUG_STATES, found="Found · needs you").get(st, st)
+    state = [h(label), bug_note(c, full=True)]
+    if c.get("branch"):
+        state.append("branch <code>%s</code>" % h(c["branch"]))
+    rows = [("State", " · ".join(state))]
+    rows += [(lab, h(c.get(k)) or "–") for k, lab in BUG_FIELDS]
+    if c.get("flow"):
+        rows.append(("Flow", "<code>%s</code>" % h(c["flow"])))
+    if c.get("run"):
+        rows.append(("Found in", bug_run_link(c["run"])))
+    if c.get("done_when"):
+        rows.append(("Done when", h(c["done_when"])))
+    if c.get("limit") is not None:
+        rows.append(("Limit", "%s %s" % (h(c["limit"]), h(c.get("limit_unit") or ""))))
+    measures = [m for m in c.get("measures") or [] if isinstance(m, dict)]
+    if measures:
+        rows.append(("Measured", "<br>".join("%s %s · %s%s · %s" % (
+            h(m.get("value")), h(m.get("unit") or ""), h(m.get("by")),
+            " · run %s" % bug_run_link(m["run"]) if m.get("run") else "", when(m.get("ts"))) for m in measures[-5:])))
+    r = c.get("review") if isinstance(c.get("review"), dict) else None
+    if r:
+        rows.append(("Review", '<b class="%s">%s</b> by %s %s%s' % (
+            "pass" if r.get("ok") else "fail", "ok" if r.get("ok") else "not ok", h(r.get("by")), when(r.get("ts")),
+            ": %s" % h(r["text"]) if r.get("text") else "")))
+    if st == "rejected":
+        rows.append(("Rejected", h(c.get("reason")) or "–"))
+    if c.get("rev") != c.get("acked") and c.get("agent"):
+        rows.append(("Changed", "rev %s; %s has read rev %s" % (h(c.get("rev")), h(c["agent"]), h(c.get("acked")))))
+    kv = "".join("<i>%s</i><span>%s</span>" % (k, v) for k, v in rows)
+    verify = ""
+    if st == "testing":
+        verify = bug_testing(c)
+    elif isinstance(c.get("last_verify"), dict):
+        v = c["last_verify"]
+        verify = '<div class="m">Last verify %s: %s</div>%s' % (
+            when(v.get("ts")), "all checks ok" if v.get("ok") else "not done", bug_checks(v.get("checks")))
+    return """<div class="detail%s" data-bug="%s"><h4>%s · %s %s</h4><p class="muted small">%s · filed %s</p>
+<div class="bkv">%s</div>%s%s</div>
+<h4>History</h4><div class="bcards hist">%s</div>""" % (
+        " stale" if bug_stale(c) else "", h(bid), h(bid), h(c.get("title")), bug_prio(c), bug_who(c), when(c.get("created")),
+        kv, verify, bug_actions(c), bug_history(c))
+
+
+def bug_edit_dialog(c):
+    prio = ""
+    if c.get("priority") in BUG_PRIORITIES:  # a found card gets its priority from the approve buttons
+        prio = '<div><div class="lbl">Priority</div>%s</div>' % chips("priority", tuple((p, p) for p in BUG_PRIORITIES), c["priority"])
+    return """<dialog id="bug-edit" class="modal">
+<form method="dialog" class="runform" data-bugedit="%s">
+<div class="mh"><h3>Edit %s</h3></div>
+%s%s
+<p class="muted small">Only what you change is saved. A card in progress or in testing goes back to POC and keeps its history; its agent has to read the change before it can finish.</p>
+<p class="err" hidden></p>
+<div class="actions"><button type="button" class="b sec" data-close>Cancel</button><button type="button" class="b" data-bugsave>Save</button></div>
+</form></dialog>""" % (h(c.get("id")), h(c.get("id")), bug_text_fields(EDIT_FIELDS, c), prio)
+
+
+def bug_card_page(ctx, project, c):
+    bid = str(c.get("id") or "")
+    can_edit = not ctx["viewer"] and c.get("state") not in ("done", "rejected")
+    body = '<div class="mh"><h3>%s<a href="/bugs/%s">Bugs · %s</a></h3>%s</div>%s<div id="bugs" class="bugs" data-project="%s" data-fragment="/bugs/%s/%s/fragment">%s</div>%s' % (
+        icon(project), u(project), h(project),
+        '<button class="b sec" data-open="bug-edit">Edit…</button>' if can_edit else "", BUG_ERR,
+        h(project), u(project), u(bid), bug_card_fragment(ctx, project, c), bug_edit_dialog(c) if can_edit else "")
+    return layout(ctx, "%s · %s" % (bid, project), body, "bugs", {"page": "bug"}, viewer_pill=BUG_PILL)

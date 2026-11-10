@@ -12,7 +12,7 @@ import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,6 +23,15 @@ STATIC = Path(__file__).resolve().parent / "static"
 MOBILE_RE = re.compile(r"Mobi|iPhone|iPad|iPod|Android|Silk|Kindle|BlackBerry|Opera Mini|IEMobile", re.I)
 MARKS = ("fix", "not-a-bug", "flaky")
 MAX_BODY = 16 * 1024
+# Bug board (CONTRACT.md "Bug board"). Everything below is checked before it reaches argv.
+BUG_RE = re.compile(r"^B-[1-9][0-9]{0,8}$")
+FLOW_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9_.-]{1,100}$")
+PRIORITIES = ("P1", "P2", "P3")
+BUG_KINDS = ("bug", "lag")
+PHONE_BUG_ACTIONS = ("approve", "reject", "reopen")  # the only POSTs a phone may send; see bugs_post
+BUG_ACTIONS = PHONE_BUG_ACTIONS + ("edit",)
+BUG_TEXT = (("title", 200), ("do", 2000), ("see", 2000), ("want", 2000), ("proof", 2000))
+BUG_EDIT_TEXT = BUG_TEXT + (("done_when", 2000),)
 COOKIE = "e2e_session"
 SESSION_S = 90 * 86400
 RENEW_S = 86400  # a session used at least daily never expires
@@ -92,6 +101,26 @@ def load_config():
     if not user or not pw:
         raise SystemExit(ENV_HELP.format(path=path, problem="needs both E2E_CONSOLE_USER and E2E_CONSOLE_PASS"))
     return Config(user, pw)
+
+
+def bug_text(body, caps, keep_empty):
+    """([(name, text)], None) for the text fields a body carries, or (None, why not).
+
+    keep_empty: an edit may clear a field; an add simply leaves an empty one out.
+    """
+    out = []
+    for name, cap in caps:
+        v = body.get(name)
+        if v is None:
+            continue
+        if not isinstance(v, str) or "\x00" in v:
+            return None, "%s must be text" % name
+        v = v.strip()
+        if len(v) > cap:
+            return None, "%s: at most %d characters" % (name, cap)
+        if v or keep_empty:
+            out.append((name, v))
+    return out, None
 
 
 def safe_next(path):
@@ -280,6 +309,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.page(200, pages.machine_page(ctx))
         if path == "/api/plan":
             return self.api_plan(q)
+        if path == "/bugs":
+            return self.bugs_index(ctx)
+        if path.startswith("/bugs/"):
+            return self.bugs_get(ctx, [unquote(p) for p in path.split("/")[2:]])
         m = re.match(r"^/projects/([^/]+)$", path)
         if m:
             name = unquote(m.group(1))
@@ -311,6 +344,54 @@ class Handler(BaseHTTPRequestHandler):
         if not api and rest == "/junit":
             return self.page(200, pages.junit_page(ctx, run))
         return self.not_found()
+
+    def known_project(self, name):
+        """A name from the registry (`e2e projects`): never a path, never an option."""
+        return isinstance(name, str) and bool(data.NAME_RE.match(name)) and name in cli.projects_or_empty()[0]
+
+    def bugs_index(self, ctx):
+        boards = {}
+        for name in sorted(cli.projects_or_empty()[0]):
+            try:
+                b = cli.bug_list(name)
+                boards[name] = b if isinstance(b, dict) else {"error": "unexpected answer"}
+            except cli.CLIError as e:
+                boards[name] = {"error": str(e)}
+        busy = [n for n, b in boards.items() if b.get("bugs")]
+        # Nothing to pick with one project, or with one board that has cards.
+        go = busy[0] if len(busy) == 1 else next(iter(boards)) if len(boards) == 1 else None
+        if go:
+            return self.send(303, "", headers={"Location": "/bugs/%s" % quote(go, safe="")})
+        return self.page(200, pages.bugs_index_page(ctx, boards))
+
+    def bugs_get(self, ctx, parts):
+        """/bugs/<project>[/<id>][/fragment]; the fragment is what the page polls."""
+        fragment = len(parts) > 1 and parts[-1] == "fragment"
+        if fragment:
+            parts = parts[:-1]
+        if len(parts) not in (1, 2) or not self.known_project(parts[0]):
+            return self.not_found()
+        project = parts[0]
+        if len(parts) == 1:
+            board, err = None, None
+            try:
+                board = cli.bug_list(project)
+            except cli.CLIError as e:
+                err = str(e)
+            if fragment:
+                return self.page(200, pages.bug_board_fragment(ctx, project, board, err))
+            return self.page(200, pages.bug_board_page(ctx, project, board, err))
+        if not BUG_RE.match(parts[1]):
+            return self.not_found()
+        try:
+            card = cli.bug_show(project, parts[1])
+        except cli.CLIError as e:
+            return self.page(404, pages.error_page(ctx, 404, "e2e bug show: %s" % e))
+        if not isinstance(card, dict):
+            return self.not_found()
+        if fragment:
+            return self.page(200, pages.bug_card_fragment(ctx, project, card))
+        return self.page(200, pages.bug_card_page(ctx, project, card))
 
     def static(self, name):
         types = {"console.css": "text/css; charset=utf-8", "console.js": "text/javascript; charset=utf-8"}
@@ -466,9 +547,13 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return body if isinstance(body, dict) else None
 
-    def operator_check(self, body, need_confirm):
-        """None if this request may act as operator, else (code, message)."""
-        if self.is_mobile():
+    def operator_check(self, body, need_confirm, phone_ok=False):
+        """None if this request may act as operator, else (code, message).
+
+        phone_ok lifts only the "not a phone" rule, for the three bug decisions
+        (see bugs_post); the sign-in and the CSRF token are needed all the same.
+        """
+        if self.is_mobile() and not phone_ok:
             return 403, "view only on phones"
         token = self.headers.get("X-CSRF-Token", "") or str((body or {}).get("csrf", ""))
         if not hmac.compare_digest(token.encode(), self.config.csrf().encode()):
@@ -543,7 +628,85 @@ class Handler(BaseHTTPRequestHandler):
             if denied:
                 return self.send_json(denied[0], {"error": denied[1]})
             return self.triage(body)
+        m = re.match(r"^/api/bugs/([^/]+)(?:/([^/]+)/([^/]+))?$", path)
+        if m:
+            return self.bugs_post(body, unquote(m.group(1)), m.group(2) and unquote(m.group(2)), m.group(3))
         return self.send_json(404, {"error": "not found"})
+
+    def bugs_post(self, body, project, bug, action):
+        """POST /api/bugs/<project> (add) and /api/bugs/<project>/<id>/<action>."""
+        if bug is not None and action not in BUG_ACTIONS:
+            return self.send_json(404, {"error": "not found"})
+        # CONTRACT.md "Console roles", phone: the one deliberate exception to
+        # "mobile user agents are always viewer". A signed-in phone may send
+        # exactly approve / reject / reopen on a bug, because that is the owner
+        # deciding from the phone, and it is recorded as `--via phone`. Adding
+        # and editing a bug stay operator-only, like runs, stops and triage
+        # marks. Do not grow PHONE_BUG_ACTIONS without changing the contract.
+        phone_ok = bug is not None and action in PHONE_BUG_ACTIONS
+        denied = self.operator_check(body, need_confirm=False, phone_ok=phone_ok)
+        if denied:
+            return self.send_json(denied[0], {"error": denied[1]})
+        if not self.known_project(project):
+            return self.send_json(400, {"error": "unknown project"})
+        if bug is None:
+            return self.bug_add(body, project)
+        if not BUG_RE.match(bug):
+            return self.send_json(400, {"error": "bad bug id (like B-12)"})
+        via = "phone" if self.is_mobile() else "console"
+        priority, reason, text = None, None, ()
+        if action == "approve":
+            priority = body.get("priority")
+            if priority not in PRIORITIES:
+                return self.send_json(400, {"error": "priority must be one of %s" % ", ".join(PRIORITIES)})
+        elif action == "reject":
+            reason = body.get("reason")
+            reason = reason.strip() if isinstance(reason, str) else ""
+            if not reason or len(reason) > pages.BUG_REASON_MAX or "\x00" in reason:
+                return self.send_json(400, {"error": "reason: 1 to %d characters" % pages.BUG_REASON_MAX})
+        elif action == "edit":
+            text, err = bug_text(body, BUG_EDIT_TEXT, keep_empty=True)
+            if err:
+                return self.send_json(400, {"error": err})
+            if ("title", "") in text:
+                return self.send_json(400, {"error": "title cannot be empty"})
+            priority = body.get("priority")
+            if priority is not None and priority not in PRIORITIES:
+                return self.send_json(400, {"error": "priority must be one of %s" % ", ".join(PRIORITIES)})
+            if not text and not priority:
+                return self.send_json(400, {"error": "nothing to change"})
+        try:
+            card = cli.bug_write(cli.bug_decide_argv(project, bug, action, via, priority, reason, text))
+        except cli.CLIError as e:
+            return self.send_json(409, {"error": str(e)})
+        return self.send_json(200, card if isinstance(card, dict) else {})
+
+    def bug_add(self, body, project):
+        text, err = bug_text(body, BUG_TEXT, keep_empty=False)
+        if err:
+            return self.send_json(400, {"error": err})
+        if not text or text[0][0] != "title":
+            return self.send_json(400, {"error": "title is required"})
+        kind, suggest, flow, rid = body.get("kind", "bug"), body.get("suggest"), body.get("flow"), body.get("run")
+        if kind not in BUG_KINDS:
+            return self.send_json(400, {"error": "kind must be one of %s" % ", ".join(BUG_KINDS)})
+        if suggest not in (None, "") + PRIORITIES:
+            return self.send_json(400, {"error": "suggest must be one of %s" % ", ".join(PRIORITIES)})
+        if flow not in (None, "") and not (isinstance(flow, str) and FLOW_RE.match(flow)):
+            return self.send_json(400, {"error": "flow must look like suite/flow"})
+        if rid not in (None, ""):
+            run = data.load_run(rid) if isinstance(rid, str) else None
+            # load_run found the folder, so rid is a well-formed run-id of this runs root.
+            if not run or run["project"] != project or data.split_run_id(rid)[0] != project:
+                return self.send_json(400, {"error": "no such run in %s" % project})
+            known = {f.get("flow") for f in run.get("failures") or []} | {f.get("id") for f in run.get("flows") or []}
+            if flow and flow not in known:
+                return self.send_json(400, {"error": "unknown flow in that run"})
+        try:
+            card = cli.bug_write(cli.bug_add_argv(project, text, kind, flow or None, rid or None, suggest or None))
+        except cli.CLIError as e:
+            return self.send_json(409, {"error": str(e)})
+        return self.send_json(201, card if isinstance(card, dict) else {})
 
     def add_project(self, body):
         path, name = body.get("path"), body.get("name")

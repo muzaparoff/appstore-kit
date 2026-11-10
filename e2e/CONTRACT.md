@@ -180,7 +180,7 @@ the owner's word arrived: `chat | console | phone`. `by` is a short name:
 
 | type | written by | fields | effect |
 |---|---|---|---|
-| `add` | `bug add` | `title, kind (bug\|lag), do, see, want, proof, flow?, run?, suggest? (P1\|P2\|P3), dry_run?` | new card, state `found` |
+| `add` | `bug add` | `title, kind (bug\|lag), do, see, want, proof, flow?, run?, suggest? (P1\|P2\|P3), dry_run?` | new card, state `found`; `dry_run` is also set when `run` is a `--dry-run` run |
 | `approve` | `bug approve` (owner) | `priority (P1\|P2\|P3)` | `found → open` |
 | `reject` | `bug reject` (owner) | `reason` (e.g. "not a bug", "same as B-4") | any state but `done → rejected` |
 | `reopen` | `bug reopen` (owner) | — | `done \| rejected → open`; clears agent, branch, passes |
@@ -310,10 +310,16 @@ commits, pushes, uploads or signs.
   (→ `e2e triage`).
   Needs a signed-in session (see below), a non-mobile UA,
   a CSRF token, and the start form's confirm field.
-  Bug board: GET `/bugs`, `/bugs/<project>`, `/bugs/<project>/<id>`;
-  POST `/api/bugs/<project>` (add, e.g. "File as bug" on a Triage row),
-  POST `/api/bugs/<project>/<id>/approve | reject | reopen | edit`
-  (→ `e2e bug … --by owner --via console`).
+  Bug board: GET `/bugs`, `/bugs/<project>`, `/bugs/<project>/<id>`, and
+  each page's `/fragment` (the part the browser polls);
+  POST `/api/bugs/<project>` (add, e.g. "File as bug" on a Triage row
+  → `e2e bug add … --by console`);
+  POST `/api/bugs/<project>/<id>/approve | reject | reopen`
+  (→ `e2e bug … --by owner --via console`);
+  POST `/api/bugs/<project>/<id>/edit` (title, do, see, want, proof,
+  done_when, priority → `e2e bug edit … --by owner --via console`).
+  400 for input the console refuses, 409 with the engine's own words when
+  the engine refuses (wrong state, unknown bug).
 - **phone**: a signed-in mobile UA is a viewer plus exactly three bug
   decisions: POST `/api/bugs/<project>/<id>/approve | reject | reopen`
   (→ `--by owner --via phone`), with the CSRF token. Nothing else: no runs,

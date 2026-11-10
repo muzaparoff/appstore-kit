@@ -359,6 +359,140 @@ def cmd_triage(args):
     return 0
 
 
+def _event_text(e):
+    t = e.get("type")
+    if t == "flow_end":
+        return "%s %s%s" % (e.get("status"), e.get("flow"),
+                            " (try %s)" % e["attempt"] if e.get("attempt", 1) > 1 else "")
+    if t == "build_end":
+        return "build done in %ss" % e.get("duration_s")
+    if t == "limit_hit":
+        return "limit hit: %s" % (e.get("text") or e.get("limit") or "")
+    if t in ("queued", "build_start", "stop_requested"):
+        return t.replace("_", " ")
+    return None  # steps, logs and simulators are noise in a terminal
+
+
+def cmd_watch(args):
+    """Follow one run until it ends: the live feed for a person or for Claude
+    (a background task or Monitor gets one line per event, then the result)."""
+    rdir = store.run_dir(args.run)
+    if not os.path.isdir(rdir):
+        raise CliError("no run %s" % args.run)
+    pos, gone = 0, 0
+    while True:
+        # State first, events second: a run that ends between the two reads
+        # is caught on the next turn, with none of its last events lost.
+        st = store.read_json(os.path.join(rdir, "state.json")) or {}
+        ended = st.get("status") in store.TERMINAL
+        try:
+            with open(os.path.join(rdir, "events.ndjson"), "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        cut = chunk.rfind(b"\n") + 1  # a half-written last line waits for the next turn
+        pos += cut
+        for raw in chunk[:cut].splitlines():
+            try:
+                e = json.loads(raw)
+            except ValueError:
+                continue
+            loud = e.get("type") == "limit_hit" or (e.get("type") == "flow_end" and e.get("status") != "passed")
+            if args.quiet and not loud:
+                continue
+            line = json.dumps(e, separators=(",", ":")) if args.json else _event_text(e)
+            if line:
+                print(line, flush=True)
+        if ended:
+            break
+        gone = 0 if pid_is_engine(st.get("pid")) else gone + 1
+        if gone >= 4:
+            raise CliError("%s is %s but its engine is gone (e2e clean closes it)" % (
+                args.run, st.get("status", "unknown")))
+        time.sleep(args.poll)
+    rep = store.read_json(os.path.join(rdir, "report.json")) or st
+    fails = [{"flow": f["flow"], "kind": f["kind"], "message": f.get("message")} for f in rep.get("failures", [])]
+    if args.json:
+        print(json.dumps({"type": "report", "run": args.run, "status": rep["status"],
+                          "counts": rep.get("counts", {}), "failures": fails}, separators=(",", ":")), flush=True)
+    else:
+        print("\n".join(["%s %s %s" % (args.run, rep["status"], _counts_text(rep.get("counts", {})))]
+                        + ["  %s %s: %s" % (f["kind"], f["flow"], f["message"]) for f in fails]), flush=True)
+    return 0 if rep["status"] == "passed" else 1
+
+
+BRIEF_RUNS = 30  # how far back "last result per suite" looks
+
+
+def _last_per_suite(project):
+    """{suite: {"run","status","finished","failed":[flow ids]}} from the newest
+    whole-suite runs; single-flow runs say nothing about a suite."""
+    out = {}
+    for rid in list(reversed(store.run_ids(project)))[:BRIEF_RUNS]:
+        d = store.run_dir(rid)
+        req = store.read_json(os.path.join(d, "request.json")) or {}
+        if req.get("flows") or req.get("dry_run"):
+            continue
+        fresh = [s for s in req.get("suites") or [] if s not in out]
+        rep = store.read_json(os.path.join(d, "report.json")) if fresh else None
+        if not rep:
+            continue
+        for s in fresh:
+            flows = [f for f in rep.get("flows", []) if f.get("suite") == s]
+            bad = [f["id"] for f in flows if f.get("status") in bugs.BROKEN]
+            done = all(f.get("status") in bugs.RAN for f in flows)
+            out[s] = {"run": rid, "finished": rep.get("finished"), "failed": bad,
+                      "status": "failed" if bad else ("passed" if done else rep.get("status"))}
+    return out
+
+
+def cmd_brief(args):
+    """What a session should know before it starts: what is running, what the
+    owner has to decide, whether design is frozen."""
+    names = [args.project] if args.project else [p["name"] for p in store.projects()]
+    if args.project and not store.find_project(args.project):
+        raise CliError("unknown project %r" % args.project)
+    runs = [{"run": r["run"], "project": r["project"], "status": r["status"], "phase": r.get("phase"),
+             "counts": r.get("counts", {}), "alive": r["alive"]}
+            for r in active_runs() if r.get("project") in names]
+    projects = []
+    for n in names:
+        board = bugs.board(n)
+        item = {"name": n, "freeze": board["freeze"], "bugs": board["counts"],
+                "needs_owner": [{"id": c["id"], "title": c["title"], "kind": c["kind"], "suggest": c["suggest"]}
+                                for c in board["bugs"] if c["state"] == "found"]}
+        if not args.line:
+            item["suites"] = _last_per_suite(n)
+        projects.append(item)
+    data = {"runs": runs, "projects": projects}
+    if args.line:
+        bits = ["%s %s %d/%d" % (r["run"], r["status"], r["counts"].get("passed", 0) + r["counts"].get("flaky", 0)
+                                 + r["counts"].get("failed", 0), r["counts"].get("total", 0)) for r in runs]
+        waiting = sum(len(p["needs_owner"]) for p in projects)
+        if waiting:
+            bits.append("1 bug needs you" if waiting == 1 else "%d bugs need you" % waiting)
+        frozen = [p["name"] for p in projects if p["freeze"]]
+        if frozen:
+            bits.append("design freeze: %s" % ", ".join(frozen))
+        emit(args, data, "e2e: " + (" · ".join(bits) or "idle"))
+        return 0
+    lines = ["running: " + (", ".join("%s %s (%s)%s" % (r["run"], r["status"], r["phase"],
+                                                         "" if r["alive"] else " DEAD") for r in runs) or "nothing")]
+    for p in projects:
+        lines.append("%s  design freeze: %s  bugs: %s" % (
+            p["name"], "ON" if p["freeze"] else "off",
+            " ".join("%s=%d" % kv for kv in p["bugs"].items() if kv[1]) or "none"))
+        for c in p["needs_owner"]:
+            lines.append("  needs the owner: %s %s%s" % (
+                c["id"], c["title"], " (suggested %s)" % c["suggest"] if c["suggest"] else ""))
+        for s, r in p["suites"].items():
+            lines.append("  %-12s %-7s %s%s" % (s, r["status"], r["run"],
+                                               "  " + ", ".join(r["failed"][:3]) if r["failed"] else ""))
+    emit(args, data, "\n".join(lines))
+    return 0
+
+
 # --- bug board --------------------------------------------------------------
 
 BUG_TEXT = (("title", 200), ("do", 2000), ("see", 2000), ("want", 2000), ("proof", 2000),
@@ -602,6 +736,15 @@ def parser():
     s.add_argument("--by", required=True)
     s.add_argument("--note")
     s.set_defaults(fn=cmd_triage)
+    s = sub.add_parser("watch")
+    s.add_argument("run")
+    s.add_argument("--quiet", action="store_true", help="only failures, limits and the result")
+    s.add_argument("--poll", type=float, default=0.5, help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_watch)
+    s = sub.add_parser("brief")
+    s.add_argument("project", nargs="?")
+    s.add_argument("--line", action="store_true", help="one line, for a status line")
+    s.set_defaults(fn=cmd_brief)
     _bug_parser(sub)
     sub.add_parser("clean").set_defaults(fn=cmd_clean)
     s = sub.add_parser("prune")

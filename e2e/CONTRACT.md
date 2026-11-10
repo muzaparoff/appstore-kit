@@ -170,7 +170,9 @@ generated placeholder PNGs. The console is developed and tested against it.
 A bug is a card with a life of its own, not a row in one run. `bugs.ndjson`
 is append-only; a card is the fold of its lines, so history is free and
 nothing is ever rewritten. Only `e2e bug` writes the file (under
-`engine/bugs-<project>.lock`); the console reads it.
+`engine/bugs-<project>.lock`), and everybody else, the console included,
+reads cards through `e2e bug list | show --json`, so the fold and the rules
+exist once.
 
 Every line: `{"ts","bug":"B-12","type","by",…}`; `via` (optional) says how
 the owner's word arrived: `chat | console | phone`. `by` is a short name:

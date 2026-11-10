@@ -120,12 +120,38 @@ def repo_root(path):
     return path
 
 
+def repo_identity(path):
+    """What makes two folders the same repository.
+
+    Worktrees of one repository share a git dir, so a second checkout is the
+    same project, not a new one. The folder inside the checkout is part of the
+    identity so two apps kept in one repository stay two projects.
+    """
+    path = os.path.realpath(path)
+    try:
+        r = subprocess.run(["git", "-C", path, "rev-parse", "--path-format=absolute",
+                            "--git-common-dir", "--show-prefix"], capture_output=True, text=True)
+    except OSError:
+        return path
+    lines = r.stdout.split("\n")
+    if r.returncode != 0 or not lines[0]:
+        return path  # not a git checkout, or the folder is gone
+    return os.path.join(os.path.realpath(lines[0]), lines[1] if len(lines) > 1 else "")
+
+
 def cmd_add(args):
     app = config.load_app(repo_root(args.repo))
     if args.name:
         if not config.NAME_RE.match(args.name):
             raise CliError("name must be lowercase letters, digits, - or _")
         app["project"] = args.name
+    # One name per repository: a second name splits its run history in two
+    # and the console then shows one app as several projects.
+    ident = repo_identity(app["repo"])
+    for p in store.projects():
+        if p["name"] != app["project"] and repo_identity(p["path"]) == ident:
+            raise CliError("this repository is already project %r; one project name per repository"
+                           % p["name"])
     store.register_project(app["project"], app["repo"])
     emit(args, {"name": app["project"], "path": app["repo"], "suites": list(app["suites"])},
          "registered %s (%s) suites: %s" % (app["project"], app["repo"], ", ".join(app["suites"])))

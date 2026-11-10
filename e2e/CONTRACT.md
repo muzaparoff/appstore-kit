@@ -132,7 +132,7 @@ All commands accept `--json` for machine output. Exit 0 = ok.
 | command | role | does |
 |---|---|---|
 | `e2e projects` | any | list projects with suites + last run |
-| `e2e add <repo-path>` | admin | register a repo that has `e2e/app.yml` |
+| `e2e add <repo-path>` | admin | register a repo that has `e2e/app.yml`. One project name per repository: a second name for the same repo, or for a worktree of it, is refused |
 | `e2e plan <project> --suite a,b` | any | estimate (s), sims, needs build?; runs nothing |
 | `e2e run <project> --suite a,b [--mode scripted] [--by console\|cli\|claude] [--dry-run] [--detach]` | operator | create run, queue, build, test, report. `--detach` prints run-id and runs in background (new session, own process group) |
 | `e2e stop <run-id>` / `e2e stop --all` | operator | SIGTERM the run's process group; run cleans up and ends `stopped` |

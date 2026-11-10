@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+import subprocess
 import threading
 import time
 
@@ -27,16 +28,33 @@ class DryRunTests(HomeCase):
         self.assertIn("unknown suite", err["error"])
 
     def test_add_by_e2e_folder_with_name_keeps_history(self):
-        code, out = self.cli_json("add", os.path.join(self.repo, "e2e"), "--name", "renamed")
-        self.assertEqual((code, out["name"], out["path"]), (0, "renamed", os.path.realpath(self.repo)))
+        other = self.make_repo("other")
+        code, out = self.cli_json("add", os.path.join(other, "e2e"), "--name", "renamed")
+        self.assertEqual((code, out["name"], out["path"]), (0, "renamed", os.path.realpath(other)))
         code, out = self.cli_json("run", "renamed", "--suite", "smoke", "--dry-run")
         self.assertEqual((code, out["run"]), (0, "renamed-1"))
         # Re-adding the same name (e.g. the repo moved) keeps its history.
-        self.cli("add", os.path.join(self.repo, "e2e", "app.yml"), "--name", "renamed")
+        self.cli("add", os.path.join(other, "e2e", "app.yml"), "--name", "renamed")
         code, out = self.cli_json("run", "renamed", "--suite", "smoke", "--dry-run")
         self.assertEqual(out["run"], "renamed-2")
         code, err = self.cli_json("add", self.repo, "--name", "Bad Name")
         self.assertEqual(code, 1)
+
+    def test_one_project_name_per_repository(self):
+        code, err = self.cli_json("add", self.repo, "--name", "demo-build1")
+        self.assertEqual(code, 1)
+        self.assertIn("already project 'demo'", err["error"])
+        # A worktree is the same repository under another folder.
+        git = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for cmd in (["init", "-q"], ["add", "."], ["commit", "-qm", "init"]):
+            subprocess.run(git + cmd, check=True, capture_output=True)
+        tree = os.path.join(self.tmp, "tree")
+        subprocess.run(git + ["worktree", "add", "-q", tree], check=True, capture_output=True)
+        code, err = self.cli_json("add", tree, "--name", "demo-build1")
+        self.assertEqual(code, 1)
+        self.assertIn("already project 'demo'", err["error"])
+        code, items = self.cli_json("projects")
+        self.assertEqual([p["name"] for p in items], ["demo"])
 
     def test_full_run_report(self):
         code, out = self.cli_json("run", "demo", "--suite", "smoke,trips,ui", "--dry-run")

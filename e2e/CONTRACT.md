@@ -34,6 +34,7 @@ uses the same venv. No other dependencies.
     triage.ndjson            append-only: {"ts","run","flow","mark","by","note"}
                              mark ∈ fix | not-a-bug | flaky
     quarantine.json          {"<flow>": {"flaky_runs": n, "since": ts}}
+    bugs.ndjson              append-only: one line per bug-card event ("Bug board")
     runs/<run-id>/           run-id = "<project>-<n>", n increments
       request.json           written by `e2e run` before anything else
       state.json             rewritten atomically (tmp + rename) as it goes
@@ -49,8 +50,12 @@ uses the same venv. No other dependencies.
 ```json
 {"run":"camipack-14","project":"camipack","suites":["trips","budget"],
  "mode":"scripted","requested_by":"console|cli|claude","requested_at":"ISO",
- "commit":"79907d9","branch":"main","dry_run":false}
+ "commit":"79907d9","branch":"main","dry_run":false,
+ "flows":null,"from":null}
 ```
+`flows` is the list of flow ids of a `--flow` run (null = whole suites);
+`from` is the folder of a `--from` run (null = the registered folder).
+`commit` and `branch` are read from the folder the run was built from.
 
 ### state.json
 ```json
@@ -135,11 +140,15 @@ All commands accept `--json` for machine output. Exit 0 = ok.
 | `e2e add <repo-path>` | admin | register a repo that has `e2e/app.yml`. One project name per repository: a second name for the same repo, or for a worktree of it, is refused |
 | `e2e plan <project> --suite a,b` | any | estimate (s), sims, needs build?; runs nothing |
 | `e2e run <project> --suite a,b [--mode scripted] [--by console\|cli\|claude] [--dry-run] [--detach]` | operator | create run, queue, build, test, report. `--detach` prints run-id and runs in background (new session, own process group) |
+| `e2e run <project> --flow <suite>/<flow>[,…] [--from <folder>] …` | operator | `--flow` runs only the named flows (ids as in state.json; `--suite` not needed). `--from` builds from another checkout of the same repository (the registered folder or a worktree of it; anything else is refused): same project, same history |
 | `e2e stop <run-id>` / `e2e stop --all` | operator | SIGTERM the run's process group; run cleans up and ends `stopped` |
 | `e2e status [<run-id>]` | any | machine gauges + active runs |
 | `e2e report <run-id>` | any | print report summary |
 | `e2e verify [<project>]` | any | recheck report hashes |
 | `e2e triage <run-id> <flow> --mark fix\|not-a-bug\|flaky --by <who> [--note …]` | operator | append one line to `triage.ndjson` |
+| `e2e watch <run-id> [--quiet]` | any | follow a run: prints its events as they are written and ends when the run ends. With `--json` each line is the raw event, then one last line `{"type":"report","run","status","counts","failures":[{"flow","kind","message"}]}`. `--quiet` prints only `flow_end` that did not pass, `limit_hit`, and the last line |
+| `e2e brief [<project>] [--line]` | any | one screen: active runs, last result per suite, bug cards that need the owner, design freeze. `--line` = one line for a status line |
+| `e2e bug …` | see "Bug board" | the only writer of `bugs.ndjson` |
 | `e2e clean` | admin | delete orphan `e2e-*` sims, stale live/ dirs, stale locks |
 | `e2e prune <project> --keep N` | admin | the only command that deletes history |
 
@@ -152,8 +161,119 @@ All commands accept `--json` for machine output. Exit 0 = ok.
 
 `--dry-run` uses the fake backend: no xcodebuild, no simctl, no Maestro;
 flows pass/fail/flake deterministically from their names (`*fail*` fails,
-`*flaky*` passes on retry, `*slow*` takes 3 s), live screenshots are
+`*flaky*` passes on retry, `*slow*` takes 3 s; a Maestro flow file with the
+line `# dry-run: fail` fails until the line is removed), live screenshots are
 generated placeholder PNGs. The console is developed and tested against it.
+
+## Bug board
+
+A bug is a card with a life of its own, not a row in one run. `bugs.ndjson`
+is append-only; a card is the fold of its lines, so history is free and
+nothing is ever rewritten. Only `e2e bug` writes the file (under
+`engine/bugs-<project>.lock`); the console reads it.
+
+Every line: `{"ts","bug":"B-12","type","by",…}`; `via` (optional) says how
+the owner's word arrived: `chat | console | phone`. `by` is a short name:
+`owner`, `lead`, `reproducer`, `fixer-1`, `reviewer`, `engine`, `console`.
+
+| type | written by | fields | effect |
+|---|---|---|---|
+| `add` | `bug add` | `title, kind (bug\|lag), do, see, want, proof, flow?, run?, suggest? (P1\|P2\|P3), dry_run?` | new card, state `found` |
+| `approve` | `bug approve` (owner) | `priority (P1\|P2\|P3)` | `found → open` |
+| `reject` | `bug reject` (owner) | `reason` (e.g. "not a bug", "same as B-4") | any state but `done → rejected` |
+| `reopen` | `bug reopen` (owner) | — | `done \| rejected → open`; clears agent, branch, passes |
+| `claim` | `bug claim` | — | `agent = by`, and the claimer has read the card (`acked = rev`) |
+| `move` | `bug move` | `to (open\|poc\|inprogress\|testing), branch?` | see moves below |
+| `note` | `bug note` | `text` | card's last note; the agent heartbeat |
+| `edit` | `bug edit` | any of `title, do, see, want, proof, priority, flow, done_when, limit, limit_unit` | changes fields, `rev += 1`. By the card's own agent: counts as read. By anybody else: a card in `inprogress \| testing` goes back to `poc`. `priority` only by the owner |
+| `ack` | `bug ack` | `rev` | the agent has read revision `rev` |
+| `review` | `bug review` | `ok, text` | a second pair of eyes on a card in `testing` (screens light and dark, the diff); never by the card's own agent |
+| `measure` | `bug measure` | `value, unit, run?` | a lag number (typed by an agent for now; the engine reads it from the test result once speed tests exist) |
+| `verify` | `bug verify` only | `ok, checks:[{"name","ok","detail"}], runs:[…]` | `ok` and state `testing` → `done` |
+
+States: `found, open, poc, inprogress, testing, done, rejected`.
+Owner-only types need `--by owner`. No command writes `done` except
+`bug verify`.
+
+Moves (`bug move --to`), all refused on `found`, `done`, `rejected`:
+
+- `open → poc` (sets `agent = by` when unclaimed)
+- a move to `inprogress | testing` by the card's agent is refused while
+  `acked < rev`: somebody changed the card, so read it and `bug ack` first
+- `poc → inprogress`: needs `flow` and `done_when`; a `lag` card also needs `limit`
+- `inprogress → testing`: needs `branch` (given here or earlier)
+- `testing → inprogress`, and `poc | inprogress | testing → open` (gives the card back; clears agent)
+
+### Card (`e2e bug list <project> --json`, `e2e bug show <project> <id> --json`)
+```json
+{"project":"camipack","freeze":true,
+ "counts":{"found":2,"open":1,"poc":1,"inprogress":1,"testing":1,"done":2,"rejected":1},
+ "bugs":[{"id":"B-12","state":"poc","title":"Map freezes about 1 s when a day opens",
+   "kind":"lag","priority":"P1","suggest":"P1","dry_run":false,
+   "do":"Open a day","see":"Map freezes about 1 s","want":"No freeze","proof":"video in run camipack-100",
+   "flow":"days/07-day-map-open","run":"camipack-100",
+   "done_when":"days/07 passes 3 runs in a row; open time under 300 ms","limit":300,"limit_unit":"ms",
+   "agent":"reproducer","branch":null,"rev":2,"acked":1,"by":"lead","reason":null,
+   "review":null,"testing_since":null,
+   "note":{"ts":"ISO","by":"reproducer","text":"writing the failing test"},
+   "measures":[{"ts":"ISO","by":"reproducer","value":980,"unit":"ms","run":"camipack-101"}],
+   "passes":0,"last_verify":{"ts":"ISO","ok":false,"checks":[{"name":"red","ok":true,"detail":"…"}]},
+   "created":"ISO","updated":"ISO"}]}
+```
+`show` returns one card plus `"history": [<its lines>]`. `list` sorts by
+state (found first, as listed above), then priority, then id. `freeze` is
+true while any card that is not `dry_run` is outside `done` and `rejected`.
+`passes` = how many of the last three runs of `flow` on the card's branch,
+asked for since the card entered `testing`, passed first try (0–3).
+`review` is `{"ts","by","ok","text"}`, `reason` is why a card was rejected,
+`by` is who filed it.
+
+### `e2e bug verify <project> <id>`: the only way to Done
+
+Reads finished runs (report.json) of the project. A `dry_run` card counts
+only `--dry-run` runs, a real card only real runs. All checks must hold:
+
+1. `red`: some finished run has `flow` as `failed | timeout | crashed`
+   (the bug was caught by a test before the fix).
+2. `green`: the last three finished runs that contain `flow`, were built
+   from the card's `branch`, and started after the card last entered
+   `testing`, all have it `passed` with `attempts == 1`.
+3. `suite`: one finished run since `testing`, on the card's `branch`, ran the
+   flow's whole suite (`request.flows` null) with no flow of that suite
+   `failed | timeout | crashed`.
+4. `limit` (lag cards): the last `measure` since `testing` is ≤ `limit`, and
+   an earlier `measure` exists.
+5. `review`: the last `review` since `testing` is ok.
+6. `rev`: the card's agent has acked the current `rev`.
+
+"Since testing" means the run was asked for (`requested_at`) after the card
+last entered `testing`; going back to `inprogress` and in again starts the
+count over. Not checked yet: new build warnings, and the owner's eye on a
+visible change (the owner can `reopen`).
+
+It appends one `verify` line either way and exits 0 when Done, 1 otherwise.
+
+### Commands
+```
+e2e bug add <project> --title … --do … --see … --want … [--proof …] [--kind bug|lag]
+            [--flow suite/flow] [--run run-id] [--suggest P1|P2|P3] [--dry-run] --by <who>
+e2e bug approve <project> <id> --priority P1|P2|P3 --by owner [--via chat|console|phone]
+e2e bug reject  <project> <id> --reason … --by owner [--via …]
+e2e bug reopen  <project> <id> --by owner [--via …]
+e2e bug claim   <project> <id> --by <agent>
+e2e bug move    <project> <id> --to open|poc|inprogress|testing [--branch name] --by <agent>
+e2e bug note    <project> <id> --text … --by <who>
+e2e bug edit    <project> <id> [--title …] [--do …] [--see …] [--want …] [--proof …]
+            [--priority P1|P2|P3] [--flow …] [--done-when …] [--limit N] [--limit-unit ms] --by <who>
+e2e bug ack     <project> <id> --by <agent>
+e2e bug measure <project> <id> --value N [--unit ms] [--run run-id] --by <who>
+e2e bug review  <project> <id> [--no] [--text …] --by <another agent>
+e2e bug verify  <project> <id>
+e2e bug list    <project> [--state found,open,…]
+e2e bug show    <project> <id>
+```
+Text fields are capped (title 200, others 2000 characters). Each writing
+command prints the card after the change (`--json`: the card object).
 
 ## Run lifecycle (engine)
 
@@ -188,6 +308,14 @@ commits, pushes, uploads or signs.
   (→ `e2e triage`).
   Needs a signed-in session (see below), a non-mobile UA,
   a CSRF token, and the start form's confirm field.
+  Bug board: GET `/bugs`, `/bugs/<project>`, `/bugs/<project>/<id>`;
+  POST `/api/bugs/<project>` (add, e.g. "File as bug" on a Triage row),
+  POST `/api/bugs/<project>/<id>/approve | reject | reopen | edit`
+  (→ `e2e bug … --by owner --via console`).
+- **phone**: a signed-in mobile UA is a viewer plus exactly three bug
+  decisions: POST `/api/bugs/<project>/<id>/approve | reject | reopen`
+  (→ `--by owner --via phone`), with the CSRF token. Nothing else: no runs,
+  no stops, no edits, no adds.
 - **admin**: none in the console. CLI on the Mac only.
 
 Every request except `/login` and `/static/console.css` needs a login

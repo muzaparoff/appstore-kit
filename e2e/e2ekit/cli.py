@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from . import build, config, lifecycle, locks, machine, store
+from . import bugs, build, config, lifecycle, locks, machine, store
 
 
 class CliError(Exception):
@@ -202,11 +202,38 @@ def _detach(run, args):
     return 0
 
 
+def load_from(name, folder):
+    """The project's app, read from another checkout of the same repository.
+
+    A fix is tested where it was made: in its own worktree, before it is
+    merged. Any other folder is refused, so a run filed under a project is
+    always a run of that project's code.
+    """
+    entry = store.find_project(name)
+    if not entry:
+        raise CliError("unknown project %r (register it with: e2e add <repo>)" % name)
+    folder = repo_root(folder)
+    if repo_identity(folder) != repo_identity(entry["path"]):
+        raise CliError("--from %s is not a checkout of %s (%s)" % (folder, name, entry["path"]))
+    app = config.load_app(folder)
+    app["project"] = name
+    return app
+
+
 def cmd_run(args):
-    app = load_registered(args.project)
+    if bool(args.suite) == bool(args.flow):
+        raise CliError("give --suite a,b or --flow suite/flow, one of them")
+    app = load_from(args.project, args.source) if args.source else load_registered(args.project)
+    flows = [f.strip() for f in (args.flow or "").split(",") if f.strip()]
+    if flows:
+        bad = [f for f in flows if "/" not in f]
+        if bad:
+            raise CliError("--flow takes suite/flow ids, not %s" % ", ".join(bad))
+        args.suite = ",".join(f.split("/", 1)[0] for f in flows)
     suites = config.pick_suites(app, args.suite)
     backend = make_backend(args.dry_run)
-    run = lifecycle.create(app, suites, backend, args.by, args.mode)
+    run = lifecycle.create(app, suites, backend, args.by, args.mode, flows=flows,
+                           source=app["repo"] if args.source else None)
     if args.detach:
         return _detach(run, args)
     if not args.json:
@@ -332,6 +359,158 @@ def cmd_triage(args):
     return 0
 
 
+# --- bug board --------------------------------------------------------------
+
+BUG_TEXT = (("title", 200), ("do", 2000), ("see", 2000), ("want", 2000), ("proof", 2000),
+            ("done_when", 2000), ("limit_unit", 16))
+
+
+def _bug_fields(args, names):
+    """The event fields the command line gave, trimmed and checked for shape."""
+    caps, out = dict(BUG_TEXT), {}
+    for n in names:
+        v = getattr(args, n, None)
+        if v is None:
+            continue
+        if n in caps:
+            v = v.strip()[:caps[n]]
+        elif n == "flow":
+            v = v.strip()
+            if not bugs.FLOW_RE.match(v):
+                raise CliError("--flow takes a suite/flow id, not %r" % v)
+        elif n == "run":
+            st = store.read_json(os.path.join(store.run_dir(v), "state.json"))
+            if not st or st.get("project") != args.project:
+                raise CliError("%s has no run %s" % (args.project, v))
+        out[n] = v
+    return out
+
+
+def _card_text(c):
+    lines = ["%s  %-10s %-3s %-3s %s" % (c["id"], c["state"], c["priority"] or "-", c["kind"], c["title"])]
+    for label, key in (("do", "do"), ("see", "see"), ("want", "want"), ("proof", "proof"),
+                       ("done when", "done_when"), ("rejected", "reason")):
+        if c.get(key):
+            lines.append("  %-10s %s" % (label + ":", c[key]))
+    if c["limit"] is not None:
+        lines.append("  %-10s %s %s" % ("limit:", c["limit"], c["limit_unit"] or ""))
+    lines.append("  flow: %s  branch: %s  agent: %s  rev %d (read %d)%s" % (
+        c["flow"] or "-", c["branch"] or "-", c["agent"] or "-", c["rev"], c["acked"],
+        "  passes %d/%d" % (c["passes"], bugs.GREEN_RUNS) if c["state"] == "testing" else ""))
+    if c["note"]:
+        lines.append("  note (%s): %s" % (c["note"]["by"], c["note"]["text"]))
+    for k in (c["last_verify"] or {}).get("checks", []):
+        lines.append("  %s %-6s %s" % ("ok " if k["ok"] else "NO ", k["name"], k["detail"]))
+    return "\n".join(lines)
+
+
+def cmd_bug(args):
+    project, act = args.project, args.act
+    if not store.find_project(project):
+        raise CliError("unknown project %r (register it with: e2e add <repo>)" % project)
+    if act == "list":
+        states = [s.strip() for s in (args.state or "").split(",") if s.strip()]
+        bad = [s for s in states if s not in bugs.STATES]
+        if bad:
+            raise CliError("unknown state(s) %s (have: %s)" % (", ".join(bad), ", ".join(bugs.STATES)))
+        data = bugs.board(project, states)
+        rows = ["%-5s %-10s %-3s %-3s %-10s %s" % (
+            c["id"], c["state"], c["priority"] or "-", c["kind"], c["agent"] or "-", c["title"])
+            for c in data["bugs"]]
+        emit(args, data, "\n".join(
+            ["%s  design freeze: %s  %s" % (project, "ON" if data["freeze"] else "off", " ".join(
+                "%s=%d" % kv for kv in data["counts"].items() if kv[1]))] + rows))
+        return 0
+    if act == "show":
+        card = bugs.read(project).get(args.bug)
+        if not card:
+            raise CliError("no bug %s" % args.bug)
+        emit(args, bugs.public(card, project, history=True), _card_text(bugs.public(card, project)))
+        return 0
+    if act == "verify":
+        card, ok = bugs.verify(project, args.bug)
+        emit(args, bugs.public(card, project), _card_text(bugs.public(card, project)))
+        return 0 if ok else 1
+    fields = {
+        "add": ("title", "kind", "do", "see", "want", "proof", "flow", "run", "suggest"),
+        "approve": ("priority",), "reject": ("reason",), "move": ("to", "branch"),
+        "note": ("text",), "measure": ("value", "unit", "run"), "review": ("text",),
+        "edit": bugs.EDITABLE,
+    }.get(act, ())
+    event = _bug_fields(args, fields)
+    if act == "add":
+        for k in ("do", "see", "want", "proof"):
+            event.setdefault(k, "")
+        if args.dry_run:
+            event["dry_run"] = True
+    elif act == "reject":
+        event["reason"] = (event.get("reason") or "").strip()[:2000]
+    elif act == "note":
+        event["text"] = event["text"].strip()[:2000]
+    elif act == "review":
+        event.update(ok=not args.no, text=(event.get("text") or "").strip()[:2000])
+    card = bugs.write(project, act, args.by, getattr(args, "bug", None), via=getattr(args, "via", None), fields=event)
+    emit(args, bugs.public(card, project), _card_text(bugs.public(card, project)))
+    return 0
+
+
+def _bug_parser(sub):
+    b = sub.add_parser("bug", help="the bug board (CONTRACT.md \"Bug board\")").add_subparsers(dest="act")
+    b.required = True
+
+    def cmd(name, bug=True, by=True, owner=False):
+        s = b.add_parser(name)
+        s.add_argument("project")
+        if bug:
+            s.add_argument("bug", help="like B-12")
+        if by:
+            s.add_argument("--by", required=True, help="owner, lead, reproducer, fixer-1, reviewer…")
+        if owner:
+            s.add_argument("--via", choices=bugs.VIAS, help="how the owner's word arrived")
+        s.set_defaults(fn=cmd_bug)
+        return s
+
+    def card_fields(s, required):
+        s.add_argument("--title", required=required)
+        s.add_argument("--do", help="what you do")
+        s.add_argument("--see", help="what you see")
+        s.add_argument("--want", help="what you want to see")
+        s.add_argument("--proof", help="where the evidence is")
+        s.add_argument("--flow", help="the test that catches it: suite/flow")
+
+    s = cmd("add", bug=False)
+    card_fields(s, True)
+    s.add_argument("--kind", default="bug", choices=bugs.KINDS)
+    s.add_argument("--run", help="the run it was found in")
+    s.add_argument("--suggest", choices=bugs.PRIORITIES, help="the finder's guess; the owner decides")
+    s.add_argument("--dry-run", action="store_true", help="a practice card: counts only dry runs, no freeze")
+    cmd("approve", owner=True).add_argument("--priority", required=True, choices=bugs.PRIORITIES)
+    cmd("reject", owner=True).add_argument("--reason", required=True)
+    cmd("reopen", owner=True)
+    cmd("claim")
+    s = cmd("move")
+    s.add_argument("--to", required=True, choices=sorted(bugs.MOVES))
+    s.add_argument("--branch")
+    cmd("note").add_argument("--text", required=True)
+    s = cmd("edit", owner=True)
+    card_fields(s, False)
+    s.add_argument("--priority", choices=bugs.PRIORITIES)
+    s.add_argument("--done-when", dest="done_when")
+    s.add_argument("--limit", type=float)
+    s.add_argument("--limit-unit", dest="limit_unit")
+    cmd("ack")
+    s = cmd("measure")
+    s.add_argument("--value", type=float, required=True)
+    s.add_argument("--unit", default="ms")
+    s.add_argument("--run")
+    s = cmd("review")
+    s.add_argument("--no", action="store_true", help="the check failed")
+    s.add_argument("--text")
+    cmd("verify", by=False)
+    cmd("list", bug=False, by=False).add_argument("--state", help="found,open,…")
+    cmd("show", by=False)
+
+
 def cmd_clean(args):
     from . import sims
     active = {r["run"] for r in active_runs() if r["alive"]}
@@ -393,7 +572,10 @@ def parser():
     s.set_defaults(fn=cmd_plan)
     s = sub.add_parser("run")
     s.add_argument("project")
-    s.add_argument("--suite", required=True)
+    s.add_argument("--suite")
+    s.add_argument("--flow", help="only these flows: suite/flow[,suite/flow]")
+    s.add_argument("--from", dest="source", metavar="FOLDER",
+                   help="build from another checkout (worktree) of the project's repository")
     s.add_argument("--mode", default="scripted", choices=["scripted"])
     s.add_argument("--by", default="cli", choices=["console", "cli", "claude"])
     s.add_argument("--dry-run", action="store_true")
@@ -420,6 +602,7 @@ def parser():
     s.add_argument("--by", required=True)
     s.add_argument("--note")
     s.set_defaults(fn=cmd_triage)
+    _bug_parser(sub)
     sub.add_parser("clean").set_defaults(fn=cmd_clean)
     s = sub.add_parser("prune")
     s.add_argument("project")

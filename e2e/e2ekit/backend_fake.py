@@ -2,6 +2,8 @@
 
 Outcomes follow flow names so the console can be built against every state:
 `*fail*` fails, `*flaky*` fails once then passes, `*slow*` takes 3 s.
+A Maestro flow whose file has the line `# dry-run: fail` fails too, so a dry
+run can show a bug going red and, once the line is removed, green.
 """
 
 import os
@@ -11,6 +13,14 @@ import time
 import zlib
 
 COLORS = [(52, 168, 83), (66, 133, 244), (251, 188, 5)]
+
+
+def _asks_to_fail(flow):
+    try:
+        with open(flow.get("path") or "") as f:
+            return any(line.strip() == "# dry-run: fail" for line in f)
+    except OSError:
+        return False
 
 
 def env_float(name, default):
@@ -96,7 +106,7 @@ class FakeBackend(object):
             if time.time() - t0 > timeout:
                 self._write(outdir, log, False)
                 return {"status": "timeout", "message": "flow exceeded %ds" % timeout, "crash": None}
-        ok = not ("fail" in name or ("flaky" in name and attempt == 1))
+        ok = not ("fail" in name or ("flaky" in name and attempt == 1) or _asks_to_fail(flow))
         if self._stop.is_set():
             ok = False
         self._write(outdir, log, ok)

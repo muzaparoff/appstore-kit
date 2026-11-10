@@ -38,15 +38,17 @@ def last_report(project):
     return None
 
 
-def estimate(app, suites):
+def estimate(app, suites, only=None):
     """Seconds for build + flows spread over the sims, from the last report's
-    durations where it has them."""
+    durations where it has them. `only` narrows it to those flow ids."""
     prev = last_report(app["project"]) or {}
     known = {f["id"]: f.get("duration_s") for f in prev.get("flows", []) if f.get("duration_s")}
     build_s = prev.get("build_s") or DEFAULT_BUILD_S
     total, flows = 0, 0
     for s in suites:
         for f in config.list_flows(app, s):
+            if only and f["id"] not in only:
+                continue
             total += known.get(f["id"]) or DEFAULT_FLOW_S[f["engine"]]
             flows += 1
     sims = app["limits"]["sims"]
@@ -81,10 +83,12 @@ class Run(object):
         self.flows = []
         for s in suites:
             self.flows.extend(config.list_flows(app, s))
+        if request.get("flows"):
+            self.flows = [f for f in self.flows if f["id"] in request["flows"]]
         self.state = {
             "run": run_id, "project": self.project, "status": "queued",
             "phase": "starting", "started": store.now_iso(), "updated": store.now_iso(),
-            "finished": None, "estimate_s": estimate(app, suites)["estimate_s"], "elapsed_s": 0,
+            "finished": None, "estimate_s": estimate(app, suites, request.get("flows"))["estimate_s"], "elapsed_s": 0,
             "sims": [], "counts": {},
             "flows": [{"id": f["id"], "suite": f["suite"], "engine": f["engine"],
                        "status": "pending", "attempts": 0, "duration_s": None, "error": None,
@@ -403,19 +407,23 @@ class Run(object):
         store.save_quarantine(self.project, q)
 
 
-def create(app, suites, backend, requested_by, mode="scripted"):
+def create(app, suites, backend, requested_by, mode="scripted", flows=None, source=None):
     """Steps 1–2 plus request.json: validate, disk, project lock, run folder.
 
     Returns a Run ready to execute(); the caller may fork first (--detach),
-    the project lock is inherited by the child.
+    the project lock is inherited by the child. `flows` narrows the run to
+    those flow ids; `source` is the folder of a `--from` run, already loaded
+    into `app`.
     """
     if mode != "scripted":
         raise RunError("unknown mode %r (only: scripted)" % mode)
     disk = backend.machine().get("disk_free_gb")
     if disk is not None and disk < config.DISK_FREE_GB:
         raise RunError("only %.1f GB disk free; need %d GB to start a run" % (disk, config.DISK_FREE_GB))
-    for s in suites:
-        config.list_flows(app, s)  # fail before taking anything
+    known = [f["id"] for s in suites for f in config.list_flows(app, s)]  # fail before taking anything
+    unknown = [f for f in flows or [] if f not in known]
+    if unknown:
+        raise RunError("unknown flow(s) %s; have: %s" % (", ".join(unknown), ", ".join(known)))
     plock = locks.project_lock(app["project"])
     if not plock.try_acquire("run"):
         raise RunError("%s already has a run in progress" % app["project"])
@@ -425,7 +433,8 @@ def create(app, suites, backend, requested_by, mode="scripted"):
         commit, branch = git_info(app["repo"])
         request = {"run": run_id, "project": app["project"], "suites": suites, "mode": mode,
                    "requested_by": requested_by, "requested_at": store.now_iso(),
-                   "commit": commit, "branch": branch, "dry_run": backend.dry_run}
+                   "commit": commit, "branch": branch, "dry_run": backend.dry_run,
+                   "flows": flows or None, "from": source}
         store.atomic_write_json(os.path.join(rdir, "request.json"), request)
         return Run(app, suites, run_id, backend, plock, request)
     except BaseException:

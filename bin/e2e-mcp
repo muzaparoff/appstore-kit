@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# MCP tool server over stdio for the e2e engine (see e2e/mcp/README.md).
+# stdout carries JSON-RPC only; everything else goes to stderr.
+set -euo pipefail
+
+# Resolve symlinks so a link in ~/bin still finds the repo.
+SRC="${BASH_SOURCE[0]}"
+while [ -L "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ "$SRC" != /* ]] && SRC="$DIR/$SRC"
+done
+KIT="$(cd -P "$(dirname "$SRC")/.." && pwd)"
+
+VENV="${E2E_VENV:-$HOME/.local/share/e2e/venv}"
+PY="$VENV/bin/python"
+
+# Same private venv as bin/e2e, which every tool call goes through.
+if ! "$PY" -c 'import yaml' >/dev/null 2>&1; then
+  echo "e2e-mcp: creating venv at $VENV (one time)" >&2
+  mkdir -p "$(dirname "$VENV")"
+  /usr/bin/python3 -m venv "$VENV" >&2
+  "$PY" -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2 >&2
+fi
+
+exec "$PY" "$KIT/e2e/mcp/server.py"

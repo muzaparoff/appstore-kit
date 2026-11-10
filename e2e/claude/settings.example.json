@@ -1,0 +1,8 @@
+{
+  "statusLine": { "type": "command", "command": "~/GitHub/appstore-kit/bin/e2e brief --line" },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "~/GitHub/appstore-kit/bin/e2e brief" }] }
+    ]
+  }
+}

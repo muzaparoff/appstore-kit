@@ -133,6 +133,16 @@ body.signin{min-height:100vh;display:grid;place-items:center;padding:16px max(16
 .segs a,.segs span{font-size:12.5px;font-weight:700;padding:5px 11px;border-radius:99px;background:var(--chip);color:var(--ink);text-decoration:none;white-space:nowrap}
 .segs span{color:var(--muted);font-weight:400}
 .segs a.on{background:var(--new);color:#fff}
+.segs .off{background:none;box-shadow:inset 0 0 0 1px var(--line);color:var(--muted);font-weight:400;pointer-events:none}
+.bsec{display:grid;gap:12px;min-width:0}
+.bsec[hidden]{display:none}
+.cols{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.cols li{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:10px;padding:4px 6px 4px 12px}
+.cols label{flex:1;display:flex;align-items:center;gap:10px;min-height:44px;min-width:0;font-weight:700;cursor:pointer}
+.cols input{width:18px;height:18px;margin:0;accent-color:var(--accent)}
+.cols input:not(:checked)+span{color:var(--muted);font-weight:400}
+.cols .b{min-width:44px;min-height:44px;justify-content:center;font-size:16px}
+.cols li:first-child [data-up],.cols li:last-child [data-down]{opacity:.35}
 .freeze{border:1px solid var(--med);border-left-width:4px;border-radius:12px;padding:10px 14px;display:grid;gap:2px;background:var(--card);font-size:13px}
 .freeze b{color:var(--med)}
 h4.need{color:var(--new)}
@@ -166,6 +176,6 @@ h4.need{color:var(--new)}
 #bug-err{border:1px solid var(--hi);border-radius:10px;padding:8px 12px;background:var(--card)}
 #bug-err[hidden]{display:none}
 /* a finger needs 44px, and iOS zooms the page on an input under 16px */
-@media (max-width:720px){.bugs .b{min-height:44px;padding:0 16px}.rej input{font-size:16px;min-height:44px}}
-body.viewer .bugs .b{min-height:44px;padding:0 16px}
+@media (max-width:720px){.bugs .b,[data-open="bug-cols"],#bug-cols .actions .b{min-height:44px;padding:0 16px}.rej input{font-size:16px;min-height:44px}}
+body.viewer .bugs .b,body.viewer [data-open="bug-cols"],body.viewer #bug-cols .actions .b{min-height:44px;padding:0 16px}
 body.viewer .rej input{font-size:16px;min-height:44px}

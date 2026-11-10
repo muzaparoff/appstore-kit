@@ -194,8 +194,69 @@
     var bugRefresh = function () {
       return fetch(bugs.getAttribute("data-fragment"), { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.text() : null; })
-        .then(function (html) { if (html != null) bugs.innerHTML = html; }, function () {});
+        .then(function (html) { if (html != null) { bugs.innerHTML = html; applyCols(); } }, function () {});
     };
+
+    // Columns: which steps this device shows, and in what order. The choice lives in
+    // this browser only; with no storage (a private window) it lasts until the page reloads.
+    var COLS_KEY = "e2e.bugcols";
+    var cols = { order: [], hidden: [] };
+    try {
+      var saved = JSON.parse(localStorage.getItem(COLS_KEY));
+      if (saved && Array.isArray(saved.order) && Array.isArray(saved.hidden)) cols = saved;
+    } catch (e) { /* default order */ }
+    var colsList = document.querySelector("#bug-cols .cols");
+    var colsNote = document.getElementById("cols-note");
+    var byStep = function (root, sel) {
+      var m = {};
+      Array.prototype.forEach.call(root.querySelectorAll(sel), function (el) { m[el.getAttribute("data-s")] = el; });
+      return m;
+    };
+    var applyCols = function () {
+      var secs = byStep(bugs, "section[data-s]"), chips = byStep(bugs, ".segs [data-s]"), names = [];
+      cols.order.forEach(function (s) { if (secs[s] && s !== "found") bugs.appendChild(secs[s]); });
+      Object.keys(chips).forEach(function (s) {
+        var off = s !== "found" && cols.hidden.indexOf(s) >= 0;
+        chips[s].classList.toggle("off", off);
+        if (secs[s]) secs[s].hidden = off;
+        if (off) names.push(chips[s].textContent.replace(/ \d+$/, ""));
+      });
+      if (colsNote) {
+        colsNote.textContent = names.length ? "Hidden on this device: " + names.join(", ") + ". Change it under Columns." : "";
+        colsNote.hidden = !names.length;
+      }
+    };
+    if (colsList) {
+      var rows = byStep(colsList, "li[data-s]");
+      cols.order.forEach(function (s) { if (rows[s]) colsList.appendChild(rows[s]); });
+      Object.keys(rows).forEach(function (s) { rows[s].querySelector("input").checked = cols.hidden.indexOf(s) < 0; });
+      var keepCols = function () {
+        cols = { order: [], hidden: [] };
+        Array.prototype.forEach.call(colsList.children, function (li) {
+          cols.order.push(li.getAttribute("data-s"));
+          if (!li.querySelector("input").checked) cols.hidden.push(li.getAttribute("data-s"));
+        });
+        try { localStorage.setItem(COLS_KEY, JSON.stringify(cols)); } catch (e) { /* this page only */ }
+        applyCols();
+      };
+      colsList.addEventListener("change", keepCols);
+      colsList.addEventListener("click", function (ev) {
+        var b = ev.target.closest && ev.target.closest("button");
+        var li = b && b.closest("li");
+        if (!li) return;
+        // The neighbour moves, not this row: the button under the finger keeps the focus.
+        var prev = li.previousElementSibling, next = li.nextElementSibling;
+        if (b.hasAttribute("data-up") && prev) colsList.insertBefore(prev, next);
+        else if (b.hasAttribute("data-down") && next) colsList.insertBefore(next, li);
+        else return;
+        keepCols();
+      });
+      document.querySelector("[data-colreset]").addEventListener("click", function () {
+        try { localStorage.removeItem(COLS_KEY); } catch (e) { /* nothing was kept */ }
+        location.reload();
+      });
+    }
+    applyCols();
     var decide = function (btn, action, body) {
       var card = btn.closest("[data-bug]");
       if (!card || bugBusy) return;

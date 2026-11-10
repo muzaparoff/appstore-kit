@@ -344,8 +344,12 @@ class ConsoleCase(unittest.TestCase):
                      'class="pr q"', "P1?", 'data-approve="P1"', 'data-approve="P2"', 'data-approve="P3"', "data-rejectbox",
                      "fix/b3-tab-bar-keyboard", "Pass 2 of 3", "green not ok", "review ok", "camipack-7 passed, camipack-8 passed",
                      "fixer-1", "moving the row state out of the list", "nobody yet", "Rejected: same as B-2", "data-reopen",
-                     'data-open="bug-add"', '<dialog id="bug-add"'):
+                     'data-open="bug-add"', '<dialog id="bug-add"', 'data-open="bug-cols"', '<dialog id="bug-cols"'):
             self.assertIn(text, board)
+        # Columns: every step is one section the page can move or hide; "Needs you" is not on the list
+        for s in ("found", "open", "poc", "inprogress", "testing", "done", "rejected"):
+            self.assertIn('<section class="bsec" data-s="%s"><h4 id="s-%s"' % (s, s), board)
+            self.assertEqual(board.count('<li data-s="%s">' % s), 0 if s == "found" else 1, s)
         self.assertEqual(board.count('class="pill bad">stale'), 1, "only B-5's note is older than 15 minutes")
         self.assertIn('class="bc stale" data-bug="B-5"', board)
         for bad in ("confirm(", "prompt(", "<script>", "onclick"):
@@ -387,8 +391,11 @@ class ConsoleCase(unittest.TestCase):
 
     def test_bug_phone_decides_and_nothing_else(self):
         board = self.req("/bugs/camipack", ua=IPHONE)[1].decode()
-        for marker in ("data-open=", "<dialog", "data-bugadd", "+ Add bug"):
+        for marker in ('data-open="bug-add"', 'id="bug-add"', "data-bugadd", "+ Add bug"):
             self.assertNotIn(marker, board)
+        # Columns is this device's own view, nothing is sent: a phone has it too, and no other dialog
+        self.assertEqual((board.count("data-open="), board.count("<dialog")), (1, 1))
+        self.assertIn('<dialog id="bug-cols"', board)
         for marker in ("view + decide", 'data-approve="P1"', "data-rejectopen", "data-reopen", 'name="csrf"'):
             self.assertIn(marker, board)
         card = self.req("/bugs/camipack/B-7", ua=IPHONE)[1].decode()

@@ -691,22 +691,25 @@ def bug_board_fragment(ctx, project, board, err=None):
     by_state = {s: [c for c in cards if c.get("state") == s] for s, _ in BUG_STATES}
     closed = len(by_state["done"]) + len(by_state["rejected"])
     segs = "".join(
-        '<a href="#s-%s"%s>%s %d</a>' % (s, ' class="on"' if s == "found" else "", label, len(by_state[s]))
-        if by_state[s] else "<span>%s 0</span>" % label for s, label in BUG_STATES)
+        '<a href="#s-%s" data-s="%s"%s>%s %d</a>' % (s, s, ' class="on"' if s == "found" else "", label, len(by_state[s]))
+        if by_state[s] else '<span data-s="%s">%s 0</span>' % (s, label) for s, label in BUG_STATES)
     out = ['<div class="segs">%s</div><p class="muted small">%d open of %d</p>' % (segs, len(cards) - closed, len(cards))]
     if board.get("freeze"):
         out.append('<div class="freeze"><b>Design freeze: on</b><span>A card is still outside Done or Rejected: '
                    'no new feature commits and no push. It lifts by itself when the last card closes.</span></div>')
+    # One <section> a step: the page moves and hides them whole (the Columns dialog).
     for s, label in BUG_STATES:
         rows = "".join(bug_card(project, c) for c in by_state[s])
         if s == "found":
-            out.append('<h4 id="s-found" class="need">Needs you %s</h4>' % pill(len(by_state[s])))
-            out.append('<div class="bcards">%s</div>' % rows if rows else
-                       '<p class="muted">Nothing waits for you.</p>')
+            sec = '<h4 id="s-found" class="need">Needs you %s</h4>' % pill(len(by_state[s]))
+            sec += '<div class="bcards">%s</div>' % rows if rows else '<p class="muted">Nothing waits for you.</p>'
             if rows:
-                out.append('<p class="muted small">New bugs wait here until you say it is a bug and give a priority. No agent starts before that.</p>')
+                sec += '<p class="muted small">New bugs wait here until you say it is a bug and give a priority. No agent starts before that.</p>'
         elif rows:
-            out.append('<h4 id="s-%s">%s %s</h4><div class="bcards">%s</div>' % (s, label, pill(len(by_state[s])), rows))
+            sec = '<h4 id="s-%s">%s %s</h4><div class="bcards">%s</div>' % (s, label, pill(len(by_state[s])), rows)
+        else:
+            continue
+        out.append('<section class="bsec" data-s="%s">%s</section>' % (s, sec))
     return "".join(out)
 
 
@@ -755,10 +758,32 @@ def bug_add_dialog(project=""):
                        chips("suggest", (("", "None"),) + tuple((p, p) for p in BUG_PRIORITIES), ""))
 
 
+def bug_cols_dialog():
+    """Which steps this device shows, and in what order. The choice stays in the
+    browser (console.js); the server and the board never hear of it, so a phone
+    may use it too. "Needs you" is not on the list: it cannot be hidden or moved."""
+    rows = "".join(
+        '<li data-s="%s"><label><input type="checkbox" checked><span>%s</span></label>'
+        '<button type="button" class="b sec" data-up aria-label="Move %s up">↑</button>'
+        '<button type="button" class="b sec" data-down aria-label="Move %s down">↓</button></li>' % (s, label, label, label)
+        for s, label in BUG_STATES if s != "found")
+    return """<dialog id="bug-cols" class="modal">
+<form method="dialog" class="runform">
+<div class="mh"><h3>Columns</h3></div>
+<p class="muted small">What this device shows, and in what order. Untick a step to hide its cards here; its count stays on top. “Needs you” always comes first.</p>
+<ul class="cols">%s</ul>
+<div class="actions"><button type="button" class="b sec" data-colreset>Reset</button><button type="button" class="b" data-close>Done</button></div>
+</form></dialog>""" % rows
+
+
 def bug_board_page(ctx, project, board, err=None):
-    add = "" if ctx["viewer"] else '<button class="b sec" data-open="bug-add">+ Add bug</button>'
-    body = '<div class="mh"><h3>%sBugs · %s</h3>%s</div>%s<div id="bugs" class="bugs" data-project="%s" data-fragment="/bugs/%s/fragment">%s</div>' % (
-        icon(project), h(project), add, BUG_ERR, h(project), u(project), bug_board_fragment(ctx, project, board, err))
+    btns = '<button class="b sec" data-open="bug-cols">Columns</button>'
+    if not ctx["viewer"]:
+        btns += '<button class="b sec" data-open="bug-add">+ Add bug</button>'
+    body = ('<div class="mh"><h3>%sBugs · %s</h3><div class="btns">%s</div></div>%s<p class="muted small" id="cols-note" hidden></p>'
+            '<div id="bugs" class="bugs" data-project="%s" data-fragment="/bugs/%s/fragment">%s</div>%s') % (
+        icon(project), h(project), btns, BUG_ERR, h(project), u(project), bug_board_fragment(ctx, project, board, err),
+        bug_cols_dialog())
     if not ctx["viewer"]:
         body += bug_add_dialog(project)
     return layout(ctx, "Bugs · " + project, body, "bugs", {"page": "bugs"}, viewer_pill=BUG_PILL)

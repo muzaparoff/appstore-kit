@@ -575,7 +575,11 @@ def cmd_bug(args):
     if act == "add":
         for k in ("do", "see", "want", "proof"):
             event.setdefault(k, "")
-        if args.dry_run:
+        # A practice run proves nothing about the app: a card filed from one is a practice
+        # card too, so it never freezes the design and verify counts the same kind of run.
+        src = event.get("run")
+        req = store.read_json(os.path.join(store.run_dir(src), "request.json"), {}) if src else {}
+        if args.dry_run or req.get("dry_run"):
             event["dry_run"] = True
     elif act == "reject":
         event["reason"] = (event.get("reason") or "").strip()[:2000]

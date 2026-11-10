@@ -128,6 +128,12 @@ class SingleFlowRuns(BugCase):
         code, err = self.cli_json("run", "demo", "--dry-run")
         self.assertIn("one of them", err["error"])
 
+    def test_card_from_a_practice_run_is_a_practice_card(self):
+        run = self.run_flow()["run"]
+        card = self.ok("add", "demo", *CARD, "--run", run, "--by", "console")
+        self.assertTrue(card["dry_run"])
+        self.assertFalse(self.ok("list", "demo")["freeze"])
+
     def test_from_takes_only_a_checkout_of_the_same_repository(self):
         tree = os.path.join(self.tmp, "tree")
         self.git("worktree", "add", "-q", "-b", "fix/b-1", tree)
